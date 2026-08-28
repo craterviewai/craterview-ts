@@ -31,10 +31,17 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # **No `registry-url`.** It looks like the right thing to set and it is what breaks the
+      # publish: `setup-node` writes an `.npmrc` holding
+      # `//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}`, and with no such variable set
+      # npm presents an empty credential — which takes precedence over the federated exchange
+      # and is refused as a 404 on the PUT, the registry's spelling of "not authorised".
+      # Provenance still signs, because that uses the workflow's own OIDC token and never
+      # touches the registry credential, so the failure arrives after every encouraging line
+      # in the log. The default registry is this one anyway.
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
-          registry-url: https://registry.npmjs.org
 
       # The npm the runner ships predates trusted publishing. Pinned exactly rather than
       # `@latest`, so the toolchain that ships the package is the one that was decided on.

@@ -1,0 +1,51 @@
+# Publish the TypeScript client to npm. Installed into craterviewai/craterview-ts by
+# release-sdk.yml in the platform repository; edit it there, not here — this file is
+# overwritten on every release.
+#
+# **No npm token exists.** Authentication is npm's trusted publishing: the job presents a
+# short-lived OIDC identity naming this repository and this workflow, and npm exchanges it for
+# a publish grant. Configure it once on the package's settings page; until then a release here
+# fails rather than falling back to anything.
+#
+# **`--provenance` is why this repository is public.** The attestation records which workflow,
+# in which repository, at which commit produced the tarball, and npm shows it on the package
+# page — the strongest signal a consumer has that they installed what this source says. It can
+# only be minted for a build running in a public repository, which is why the private platform
+# repository hands the release here rather than doing it directly.
+name: publish
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # What mints the OIDC token, for both the grant and the provenance attestation.
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      # The npm the runner ships predates trusted publishing. Pinned exactly rather than
+      # `@latest`, so the toolchain that ships the package is the one that was decided on.
+      - run: npm install -g npm@12.0.2
+
+      # The suite travels with the package, so what goes out is what was tested — on the
+      # runner that ships it, not only on the one that mirrored it.
+      - run: npm ci
+      - run: npm test
+
+      - name: What is about to go out
+        run: npm publish --provenance --access public --dry-run
+
+      - run: npm publish --provenance --access public

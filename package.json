@@ -1,0 +1,30 @@
+{
+  "name": "craterview",
+  "version": "0.1.1",
+  "dependencies": {},
+  "description": "TypeScript client for the CraterView image enhancement API",
+  "type": "module",
+  "main": "index.ts",
+  "types": "index.ts",
+  "files": [
+    "index.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/craterviewai/craterview-ts.git"
+  },
+  "homepage": "https://craterview.ai",
+  "bugs": "https://github.com/craterviewai/craterview-ts/issues",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11"
+  }
+}

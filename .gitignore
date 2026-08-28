@@ -1,0 +1,5 @@
+# The root ignores lockfiles, a rule written for this directory's toolchain before it had one
+# worth keeping. It has: `index.ts` is what npm publishes, so whatever formats, type-checks and
+# tests it is part of how the published file gets its shape. Committed for the reason mcp/ commits
+# its own — an unpinned toolchain is a different toolchain on the next install.
+!package-lock.json

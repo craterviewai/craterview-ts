@@ -7,13 +7,25 @@
  * client's idiomatic signature and asserts the request that goes out is identical.
  */
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CraterView, CraterViewError, RateLimited } from "../index";
 
-const contract = JSON.parse(
-  readFileSync(new URL("../../../tests/contract/wire_contract.json", import.meta.url), "utf8"),
-) as {
+// The fixture is shared with the other client's suite and lives beside it, one level above
+// this package. A standalone checkout of this repository does not have it — the package is at
+// the root there, with nothing above — so these cases skip rather than fail. Everything else
+// in this directory tests the client on its own and runs anywhere.
+//
+// Skipping is safe because this file cannot be the only thing checking the contract: it exists
+// to catch the two clients drifting apart, so it is meaningful only where both are present, and
+// there it always runs.
+const FIXTURE = new URL("../../../tests/contract/wire_contract.json", import.meta.url);
+const shared = existsSync(fileURLToPath(FIXTURE));
+
+const contract = (shared ? JSON.parse(readFileSync(FIXTURE, "utf8")) : {
+  submit: [], auth: [], errors: [], account: [],
+}) as {
   submit: Array<{ name: string; call: Record<string, any>; expect: Record<string, any> }>;
   auth: Array<{ name: string; api_key: string; expect: { headers: Record<string, string> } }>;
   errors: Array<{ status: number; detail: string; retry_after?: string; expect_type: string }>;
@@ -41,7 +53,7 @@ function stub(status = 200, body: unknown = {}, headers: Record<string, string> 
 
 afterEach(() => vi.unstubAllGlobals());
 
-describe("wire contract: submit", () => {
+describe.skipIf(!shared)("wire contract: submit", () => {
   for (const testCase of contract.submit) {
     it(testCase.name, async () => {
       const calls = stub(200, { id: "job_1", model: "m", status: "queued" });
@@ -71,7 +83,7 @@ describe("wire contract: submit", () => {
   }
 });
 
-describe("wire contract: auth", () => {
+describe.skipIf(!shared)("wire contract: auth", () => {
   for (const testCase of contract.auth) {
     it(testCase.name, async () => {
       const calls = stub(200, []);
@@ -83,7 +95,7 @@ describe("wire contract: auth", () => {
   }
 });
 
-describe("wire contract: errors", () => {
+describe.skipIf(!shared)("wire contract: errors", () => {
   const types: Record<string, unknown> = { RateLimited, CraterViewError };
 
   for (const testCase of contract.errors) {
@@ -118,7 +130,7 @@ const METHODS: Record<string, (cv: CraterView, args: any[]) => Promise<unknown>>
   rotate_webhook_secret: (cv) => cv.rotateWebhookSecret(),
 };
 
-describe("wire contract: account", () => {
+describe.skipIf(!shared)("wire contract: account", () => {
   for (const testCase of contract.account) {
     it(testCase.name, async () => {
       const isDelete = testCase.expect.method === "DELETE";

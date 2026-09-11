@@ -9,21 +9,19 @@
  *
  * Zero dependencies: fetch and Blob are standard in Node 18+ and every browser, so the
  * client stays installable anywhere without dragging a transitive tree behind it.
- *
- * **This file is published.** It goes to GitHub and npm, and `main` points at the source, so
- * every comment here ships and a doc-comment on an exported member appears in a consumer's
- * editor. Write for someone who can see this package and nothing else: what the client does
- * and what a caller has to know, never how the service behind it is built.
  */
 
 // Mirrored from package.json, which is the number a release bumps. It cannot be imported
 // from there — this ships as TypeScript, so the import would have to resolve in the
 // consumer's toolchain — so test/version.test.ts asserts the two agree.
-export const VERSION = "0.1.3";
+export const VERSION = "0.1.5";
 const DEFAULT_BASE_URL = "https://api.craterview.ai";
-// The server rejects a longer wait outright, so asking for one costs a 422 rather than a
-// longer wait. Keep in step with MAX_WAIT_SECONDS in the gateway.
+// The server rejects a longer wait outright, so asking for one costs a 422 rather than the
+// wait you asked for. `run()` clamps to this rather than letting that happen.
 const MAX_SERVER_WAIT = 30;
+// The largest page the job history serves. Same reasoning: a bigger `limit` is refused, so
+// `jobs()` clamps rather than spending a request to be told no.
+const MAX_PAGE = 200;
 
 /**
  * A random key for safely repeating a submission.
@@ -132,7 +130,7 @@ export class InvalidSignature extends CraterViewError {}
  *
  * Throws {@link InvalidSignature} if it does not check out. **Verify before you parse**, and
  * pass the raw body exactly as received — most frameworks parse JSON for you, and
- * re-serialising it changes the bytes the signature was computed over. In Express that means
+ * re-serializing it changes the bytes the signature was computed over. In Express that means
  * `express.raw({ type: "application/json" })` on this route.
  *
  * Async because it uses WebCrypto, which is what makes this work unchanged in Node and in a
@@ -220,8 +218,8 @@ function timingSafeEqual(a: string, b: string): boolean {
 }
 
 /**
- * One entry from the model catalogue, exactly as it arrives. Snake case is the wire's, as
- * with `JobData` — there is no wrapper class here because there is no behaviour to add.
+ * One entry from the model catalog, exactly as it arrives. Snake case is the wire's, as
+ * with `JobData` — there is no wrapper class here because there is no behavior to add.
  */
 export interface ModelInfo {
   /** The public name, and what you pass as `model` when submitting. */
@@ -248,6 +246,11 @@ export interface ModelInfo {
    * look identical in `accepts` alone.
    */
   video_coming_soon?: boolean;
+  /**
+   * How long this model is for. `fixed` is a lasting part of the service; `comet` is a
+   * featured model that may be withdrawn at short notice, so build on it knowing that.
+   */
+  tenure?: "fixed" | "comet";
   max_input_bytes: number;
   /**
    * The ceilings **your key** is held to, not the model's widest. Community work is bounded
@@ -279,7 +282,8 @@ export interface ModelInfo {
   queue_depth: number;
   /**
    * Whether your key's work goes to the community queue, which is served after priority
-   * work and takes a small share of it. False once the account holds credit.
+   * work and always takes a share of it, so it never stalls behind paid work. False once
+   * the account holds credit.
    *
    * The same field, meaning the same thing, as `Job.community` — these are the two places
    * the API describes a wait, and they describe it the same way.
@@ -287,7 +291,6 @@ export interface ModelInfo {
   community: boolean;
   /** Of `params_schema`, the ones that apply to still images only. */
   image_only_params: string[];
-  /** A representative job, for sizing a progress indicator before any eta arrives. */
 }
 
 /** One key on the account. Never the key itself — only the prefix, which identifies it. */
@@ -400,10 +403,12 @@ export interface JobData {
  * counting time spent waiting for a GPU as well as time spent on one. An estimate and never
  * a promise — read it as guidance, not a deadline. Absent once a job has settled.
  *
- * `community` says the job was submitted against a balance of zero and is on the queue
- * served after priority work, which takes a small share of it rather than only what is left.
- * Nothing is refused for want of credit — credit buys a place at the front of the queue, not
- * the right to submit — so an empty balance means a longer wait and never an error.
+ * `community` says the job is on the queue served after priority work, which always takes
+ * a share of it rather than only what is left over — so it waits longer at busy times and
+ * never stalls behind paid work. That is where an account goes when it has not
+ * paid for priority — by holding credit or by subscribing. Nothing is refused for want of
+ * either: paying buys a place at the front of the queue, not the right to submit, so an
+ * account that has not paid means a longer wait and never an error.
  */
 export class Job {
   constructor(private readonly data: JobData) {}
@@ -418,7 +423,7 @@ export class Job {
   get etaSeconds() { return this.data.eta_seconds ?? null; }
   /** Your own name for this job, or null if you did not send one. */
   get customId() { return this.data.custom_id ?? null; }
-  // Defaulted rather than nulled: a gateway too old to send the field is not running a
+  // Defaulted rather than nulled: a server too old to send the field is not running a
   // community queue at all, so its jobs are paid work.
   get community() { return this.data.community ?? false; }
   // Nulled rather than defaulted, unlike `community` above: absent means the image was not
@@ -557,7 +562,7 @@ export class CraterView {
    * at the same moment can get different numbers, and buying credit changes yours.
    *
    * A model that is available is not always listed — a model in trial, or being retired,
-   * stays usable by name while absent from this catalogue.
+   * stays usable by name while absent from this catalog.
    */
   async models(): Promise<ModelInfo[]> {
     return await this.request("GET", "/v1/models") as ModelInfo[];
@@ -594,7 +599,7 @@ export class CraterView {
    * job and is billed for both.
    */
   async submit(inputKey: string, options: SubmitOptions = {}): Promise<Job> {
-    const { wait = 0, idempotencyKey, webhookUrl, customId, model = "cv-restore-v1",
+    const { wait = 0, idempotencyKey, webhookUrl, customId, model = "cv-enhance-v3",
             ...params } = options;
     // Annotated, not inferred: without this the two branches unify to a type whose key
     // may be `undefined`, which is not assignable to Record<string, string>.
@@ -618,11 +623,17 @@ export class CraterView {
    *
    * Scoped to the account rather than to this key, so a key sees every job the account has
    * run and not only the ones it submitted itself.
+   *
+   * `limit` is how many jobs one request fetches, not how many you get: iteration continues
+   * until the history runs out. 200 is the largest page the API serves, and a bigger number
+   * is fetched as 200 rather than sent and refused.
    */
   async *jobs(options: { limit?: number; status?: JobStatus } = {}): AsyncGenerator<Job> {
     let before: string | undefined;
     for (;;) {
-      const params = new URLSearchParams({ limit: String(options.limit ?? 50) });
+      const params = new URLSearchParams({
+        limit: String(Math.min(options.limit ?? 50, MAX_PAGE)),
+      });
       if (options.status) params.set("status", options.status);
       if (before) params.set("before", before);
 

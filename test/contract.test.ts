@@ -3,8 +3,11 @@
  *
  * Each client is already tested on its own. What neither suite can see alone is the two
  * drifting apart — one sending output_format while the other sends outputFormat passes
- * both and fails only against a real gateway. This maps each contract case onto this
+ * both and fails only against a real server. This maps each contract case onto this
  * client's idiomatic signature and asserts the request that goes out is identical.
+ *
+ * **Published with the package.** This file goes to the public repository, so write it
+ * for someone who has this package and nothing else — never how the service is built.
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -117,7 +120,7 @@ describe.skipIf(!shared)("wire contract: errors", () => {
 /**
  * The credential calls. Each is one line in each client, which is exactly why they drift:
  * a path or a method typed differently in one of them is invisible until a customer's key
- * management fails against the real gateway.
+ * management fails against the real server.
  *
  * The contract names methods in the Python client's spelling, because the wire is what it
  * describes and each language spells its own call how its language would.

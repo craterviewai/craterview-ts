@@ -3,6 +3,9 @@
  *
  * Every case here is a mistake a receiver can actually make, and each one is the difference
  * between a webhook endpoint that authenticates its input and one that only appears to.
+ *
+ * **Published with the package.** This file goes to the public repository, so write it
+ * for someone who has this package and nothing else — never how the service is built.
  */
 
 import { describe, expect, it } from "vitest";

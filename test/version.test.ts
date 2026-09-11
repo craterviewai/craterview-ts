@@ -10,6 +10,9 @@
  * So: duplicate the value, and make a test the thing that keeps the copies honest.
  * Replace this with a generated version.ts once there is a `tsc` build to generate it
  * during.
+ *
+ * **Published with the package.** This file goes to the public repository, so write it
+ * for someone who has this package and nothing else — never how the service is built.
  */
 
 import { readFileSync } from "node:fs";

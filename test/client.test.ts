@@ -3,6 +3,9 @@
  *
  * They assert two things the integration tests cannot cheaply reach: exactly what the
  * client puts on the wire, and how it maps responses back to typed errors.
+ *
+ * **Published with the package.** This file goes to the public repository, so write it
+ * for someone who has this package and nothing else — never how the service is built.
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -107,7 +110,7 @@ describe("error mapping", () => {
     });
   });
 
-  it("maps a 402 from an older gateway to the base error", async () => {
+  it("maps a 402 from an older server to the base error", async () => {
     // Nothing is refused for want of credit, so this client declares no type for it. A
     // caller pointed at a deployment that does refuse must still get something catchable.
     stubFetch([{ status: 402, body: { detail: "quota exhausted" } }]);
@@ -154,6 +157,25 @@ describe("pagination", () => {
     expect(calls[1]!.url).toContain("before=a");
   });
 
+  it("fetches a page bigger than the API serves at the ceiling", async () => {
+    // `limit` is a page size and iteration is transparent, so a caller asking for a bigger
+    // page still gets every job — clamping costs them nothing, and sending it costs them a
+    // 422 on the first request. The Python client clamps at the same number.
+    const calls = stubFetch([{ body: { data: [{ id: "a", model: "m", status: "succeeded" }], has_more: false } }]);
+    const ids: string[] = [];
+    for await (const job of client("k").jobs({ limit: 5000 })) ids.push(job.id);
+
+    expect(ids).toEqual(["a"]);
+    expect(calls[0]!.url).toContain("limit=200");
+  });
+
+  it("sends a page the API will serve as asked", async () => {
+    // The other side, so the clamp cannot become a fixed page size.
+    const calls = stubFetch([{ body: { data: [], has_more: false } }]);
+    for await (const _ of client("k").jobs({ limit: 7 })) { /* drained */ }
+    expect(calls[0]!.url).toContain("limit=7");
+  });
+
   it("terminates when has_more is true but next_before is missing", async () => {
     // A server that says "more" without a cursor would otherwise spin forever.
     stubFetch([{ body: { data: [{ id: "a", model: "m", status: "succeeded" }], has_more: true } }]);
@@ -178,7 +200,7 @@ describe("pagination", () => {
 
 describe("job", () => {
   const job = (over: Record<string, unknown> = {}) =>
-    ({ id: "job_1", model: "cv-restore-v1", status: "succeeded", ...over });
+    ({ id: "job_1", model: "cv-enhance-v3", status: "succeeded", ...over });
 
   it("exposes status predicates", async () => {
     stubFetch([{ body: job({ status: "queued" }) }]);
@@ -207,7 +229,7 @@ describe("job", () => {
   });
 
   it("treats an omitted community flag as paid work", async () => {
-    // A gateway with no community queue omits the flag, and its jobs are paid work.
+    // A server that omits the flag is not running community work, so its jobs are paid.
     // Null here would be a third state that means nothing to a caller.
     stubFetch([{ body: job({ status: "queued" }) }]);
     const queued = await client("k").job("job_1");
@@ -220,7 +242,7 @@ describe("run", () => {
     const calls = stubFetch([
       { body: { input_key: "inputs/abc", upload_url: "http://storage.test/put" } },
       { status: 200 },  // the PUT to object storage
-      { body: { id: "job_1", model: "cv-restore-v1", status: "succeeded", output_url: "http://x" } },
+      { body: { id: "job_1", model: "cv-enhance-v3", status: "succeeded", output_url: "http://x" } },
     ]);
 
     const job = await client("k").run(new Blob(["x"], { type: "image/png" }),

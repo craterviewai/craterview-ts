@@ -237,6 +237,68 @@ describe("job", () => {
   });
 });
 
+// A 40 × 25 PNG, 97 bytes: enough of a file for the header reader to size.
+const PNG_40x25 = Uint8Array.from(atob(
+  "iVBORw0KGgoAAAANSUhEUgAAACgAAAAZCAIAAADMuvsyAAAAKElEQVR4nO3NAQ0AAAgDIK/9OxvDzUEBkp660Cer" +
+  "WCwWi8VisVj8K156IQA4rw/PUgAAAABJRU5ErkJggg=="), (c) => c.charCodeAt(0));
+
+describe("the declared size", () => {
+  // `upload()` reads the image's size from its header and `submit()` sends it as
+  // `input_megapixels` for the key it came back with, so a caller who passes the key
+  // straight through declares without carrying anything. Only the estimate reads it on the
+  // other side; the concern here is that the figure is right, travels, and is never invented.
+  const slots = () => [
+    { body: { input_key: "inputs/abc", upload_url: "http://storage.test/put" } },
+    { status: 200 },
+    { body: { id: "job_1", model: "cv-enhance-v3", status: "queued" } },
+  ];
+
+  it("reads the size at upload and sends it with a submit of that key", async () => {
+    const calls = stubFetch(slots());
+    const cv = client("k");
+    const key = await cv.upload(PNG_40x25, "image/png");
+    await cv.submit(key, { scale: 4 });
+    const body = JSON.parse(calls[2]!.init.body as string);
+    expect(body.input_megapixels).toBeCloseTo(0.001, 4);
+    expect(body.params).toEqual({ scale: 4 });  // beside params, not a model parameter
+  });
+
+  it("declares nothing for a file the reader does not know", async () => {
+    const calls = stubFetch(slots());
+    const cv = client("k");
+    const key = await cv.upload(new Blob(["not an image"], { type: "image/png" }));
+    await cv.submit(key);
+    expect(JSON.parse(calls[2]!.init.body as string)).not.toHaveProperty("input_megapixels");
+  });
+
+  it("declares nothing for a key it did not upload, unless told", async () => {
+    const calls = stubFetch(slots().slice(2));
+    const cv = client("k");
+    await cv.submit("inputs/elsewhere");
+    expect(JSON.parse(calls[0]!.init.body as string)).not.toHaveProperty("input_megapixels");
+    await cv.submit("inputs/elsewhere", { inputMegapixels: 12 });
+    expect(JSON.parse(calls[1]!.init.body as string).input_megapixels).toBe(12);
+  });
+
+  it("lets an explicit figure override the one it read", async () => {
+    const calls = stubFetch(slots());
+    const cv = client("k");
+    const key = await cv.upload(PNG_40x25, "image/png");
+    await cv.submit(key, { inputMegapixels: 2.5 });
+    expect(JSON.parse(calls[2]!.init.body as string).input_megapixels).toBe(2.5);
+  });
+
+  it("run() declares the size of the image it was handed", async () => {
+    const calls = stubFetch([
+      slots()[0]!, slots()[1]!,
+      { body: { id: "job_1", model: "cv-enhance-v3", status: "succeeded",
+                result: { output: { url: "http://x" } } } },
+    ]);
+    await client("k").run(PNG_40x25);
+    expect(JSON.parse(calls[2]!.init.body as string).input_megapixels).toBeCloseTo(0.001, 4);
+  });
+});
+
 describe("run", () => {
   it("uploads, submits and returns a settled job in one call", async () => {
     const calls = stubFetch([

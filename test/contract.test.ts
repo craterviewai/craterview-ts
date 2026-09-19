@@ -60,7 +60,8 @@ describe.skipIf(!shared)("wire contract: submit", () => {
   for (const testCase of contract.submit) {
     it(testCase.name, async () => {
       const calls = stub(200, { id: "job_1", model: "m", status: "queued" });
-      const { model, input_key, params, wait, idempotency_key, webhook_url } = testCase.call;
+      const { model, input_key, params, wait, idempotency_key, webhook_url,
+              input_megapixels } = testCase.call;
 
       const cv = new CraterView({ apiKey: "k", baseUrl: "http://gateway.test" });
       await cv.submit(input_key, {
@@ -68,6 +69,7 @@ describe.skipIf(!shared)("wire contract: submit", () => {
         ...(wait !== undefined ? { wait } : {}),
         ...(idempotency_key ? { idempotencyKey: idempotency_key } : {}),
         ...(webhook_url ? { webhookUrl: webhook_url } : {}),
+        ...(input_megapixels ? { inputMegapixels: input_megapixels } : {}),
         ...params,
       });
 

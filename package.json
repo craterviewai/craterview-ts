@@ -1,6 +1,6 @@
 {
   "name": "craterview",
-  "version": "0.3.8",
+  "version": "0.3.12",
   "dependencies": {},
   "description": "TypeScript client for the CraterView image enhancement API",
   "type": "module",

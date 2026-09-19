@@ -7,14 +7,18 @@
  *   const job = await cv.run(file, { style: "photo" });
  *   const blob = await job.blob();
  *
- * Zero dependencies: fetch and Blob are standard in Node 18+ and every browser, so the
- * client stays installable anywhere without dragging a transitive tree behind it.
+ * One dependency: `image-size`, which reads an image's dimensions from its header — no
+ * decoding — so the client can tell the API how big the file you sent is and get a wait
+ * estimated for that file rather than a typical one. fetch and Blob are standard in Node 18+
+ * and every browser, and `image-size` runs in both, so the client stays installable anywhere.
  */
+
+import { imageSize } from "image-size";
 
 // Mirrored from package.json, which is the number a release bumps. It cannot be imported
 // from there — this ships as TypeScript, so the import would have to resolve in the
 // consumer's toolchain — so test/version.test.ts asserts the two agree.
-export const VERSION = "0.3.12";
+export const VERSION = "0.3.13";
 const DEFAULT_BASE_URL = "https://api.craterview.ai";
 // The server rejects a longer wait outright, so asking for one costs a 422 rather than the
 // wait you asked for. `run()` clamps to this rather than letting that happen.
@@ -485,6 +489,23 @@ export interface CraterViewOptions {
   baseUrl?: string;
 }
 
+/**
+ * Width × height ÷ 10⁶ from the file's header, or `undefined` for a file the reader does not
+ * know. Reads the first megabyte only — every format's dimensions sit near the front, and a
+ * Blob of any size costs one bounded copy — and never throws: a size the client cannot read
+ * is simply not declared.
+ */
+async function megapixelsOf(blob: Blob): Promise<number | undefined> {
+  try {
+    const head = new Uint8Array(await blob.slice(0, 1 << 20).arrayBuffer());
+    const { width, height } = imageSize(head);
+    if (!width || !height) return undefined;
+    return Math.round((width * height) / 1e6 * 1e4) / 1e4 || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export interface SubmitOptions {
   wait?: number;
   idempotencyKey?: string;
@@ -500,6 +521,14 @@ export interface SubmitOptions {
    * becomes a model parameter, is checked against the model's schema, and would be refused.
    */
   customId?: string;
+  /**
+   * The size of the file you uploaded, in megapixels (width × height ÷ 1,000,000). Used
+   * only to estimate `eta_seconds` for your image rather than for a typical one — it does
+   * not affect the price, the queue or whether the job is accepted, all of which read the
+   * file itself. Left unset, the size `upload()` read from the file is sent for a key this
+   * client uploaded; set it to override or to supply one for a key uploaded elsewhere.
+   */
+  inputMegapixels?: number;
   model?: string;
   [param: string]: unknown;
 }
@@ -507,6 +536,10 @@ export interface SubmitOptions {
 export class CraterView {
   private readonly baseUrl: string;
   private readonly headers: Record<string, string>;
+  // What `upload()` read from each file's header, by the key it came back with, so a later
+  // `submit()` of that key declares the size without the caller carrying it. Bounded: a
+  // long-lived client uploading thousands of files keeps the most recent few hundred.
+  private readonly sizes = new Map<string, number>();
 
   constructor(options: CraterViewOptions = {}) {
     this.baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/$/, "");
@@ -564,6 +597,11 @@ export class CraterView {
   /**
    * Put an image in storage and return its key. Bytes go straight to object storage on a
    * presigned URL, never through the API.
+   *
+   * The image's size is read from its header on the way past and remembered against the
+   * key, so `submit()` can tell the API what you sent and `eta_seconds` is estimated for
+   * your image rather than a typical one. A file the reader does not know is uploaded just
+   * the same; only the estimate is less specific.
    */
   async upload(image: Blob | ArrayBuffer | Uint8Array, contentType?: string): Promise<string> {
     const blob = image instanceof Blob
@@ -581,6 +619,11 @@ export class CraterView {
       method: "PUT", body: blob, headers: { "Content-Type": type },
     });
     if (!put.ok) throw new CraterViewError(`upload failed: ${put.status}`);
+    const megapixels = await megapixelsOf(blob);
+    if (megapixels) {
+      if (this.sizes.size >= 512) this.sizes.delete(this.sizes.keys().next().value!);
+      this.sizes.set(slot.input_key, megapixels);
+    }
     return slot.input_key;
   }
 
@@ -592,8 +635,9 @@ export class CraterView {
    * job and is billed for both.
    */
   async submit(inputKey: string, options: SubmitOptions = {}): Promise<Job> {
-    const { wait = 0, idempotencyKey, webhookUrl, customId, model = "cv-enhance-v3",
-            ...params } = options;
+    const { wait = 0, idempotencyKey, webhookUrl, customId, inputMegapixels,
+            model = "cv-enhance-v3", ...params } = options;
+    const declared = inputMegapixels ?? this.sizes.get(inputKey);
     // Annotated, not inferred: without this the two branches unify to a type whose key
     // may be `undefined`, which is not assignable to Record<string, string>.
     const headers: Record<string, string> = idempotencyKey
@@ -603,6 +647,7 @@ export class CraterView {
       model, input_key: inputKey, params,
       ...(webhookUrl ? { webhook_url: webhookUrl } : {}),
       ...(customId ? { custom_id: customId } : {}),
+      ...(declared && declared > 0 ? { input_megapixels: declared } : {}),
     }, headers);
     return new Job(data);
   }

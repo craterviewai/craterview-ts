@@ -13,9 +13,11 @@ compiles this too: any bundler, `tsx` or `ts-node`, Bun, Deno, or Node 22.6 and 
 type stripping (`--experimental-strip-types`, which recent releases enable by default). A
 plain JavaScript project invoking `node` directly cannot import it.
 
-The code itself needs Node 18 or newer, or any modern browser. **Zero runtime
-dependencies** — `fetch`, `Blob` and `crypto.getRandomValues` are standard in both, so the
-client installs without dragging a transitive tree behind it.
+The code itself needs Node 18 or newer, or any modern browser. **One runtime dependency**,
+[`image-size`](https://www.npmjs.com/package/image-size), pure JavaScript that runs in
+both: it reads an image's dimensions from its header — nothing is decoded — so `upload()`
+can tell the API how big your file is and `etaSeconds` is estimated for that file rather
+than for a typical one. `fetch`, `Blob` and `crypto.getRandomValues` are standard in both.
 
 ## Quickstart
 
@@ -150,7 +152,7 @@ Every field the API publishes on a job is exposed here.
 | `error` | Set when the job failed. Safe to show a user |
 | `errorCode` | The same fact, as a stable identifier. Branch on this, show the other |
 | `credits` | **What you were billed** |
-| `etaSeconds` | Seconds until the job is expected to finish, recomputed on every read — it counts down while the job runs. Absent once the job has settled |
+| `etaSeconds` | Seconds until the job is expected to finish, recomputed on every read — it counts down while the job runs. Absent once the job has settled. Estimated for your image's size when `upload()` could read it (or when you pass `inputMegapixels` to `submit()`), for a typical image otherwise |
 | `community` | True when the job is on the community queue: served after priority work, always taking a share of it, so it never stalls behind paid work |
 | `outputUrl`, `downloadUrl` | The result, presigned. One to display, one to save |
 | `thumbUrl` | A small JPEG of the result, for listings. Null when none was drawn |

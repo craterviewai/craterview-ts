@@ -10,7 +10,7 @@
  */
 
 import { beforeAll, describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { CraterView, JobFailed } from "../index";
 
 const BASE_URL = process.env.CV_BASE_URL ?? "http://localhost:8000";
@@ -23,8 +23,11 @@ const BASE_URL = process.env.CV_BASE_URL ?? "http://localhost:8000";
 // configured" and "not running" deserve the same treatment: neither is a failing SDK.
 const API_KEY = process.env.CV_API_KEY ?? "";
 // Sample images for the live cases, outside this package. Point CV_SDK_TEST_INPUTS at a
-// directory of your own; the cases that need one skip when it is not there.
+// directory of your own; the cases that need one skip when it is not there, and say where
+// they looked.
 const INPUTS = process.env.CV_SDK_TEST_INPUTS ?? "../../../../sample-inputs";
+const INPUTS_URL = new URL(`${INPUTS}/`, import.meta.url);
+const HAVE_INPUTS = existsSync(INPUTS_URL);
 
 // Two cases below need a job that finishes quickly and needs no particular hardware, and do
 // not care what it produces. Which model that is belongs to the server you point this at, so
@@ -50,15 +53,35 @@ beforeAll(async () => {
 const cv = () => new CraterView({ baseUrl: BASE_URL, apiKey: API_KEY });
 
 function image(name: string, type = "image/png"): Blob {
-  return new Blob([readFileSync(new URL(`${INPUTS}/${name}`, import.meta.url))], { type });
+  return new Blob([readFileSync(new URL(name, INPUTS_URL))], { type });
 }
 
-// **The four cases that call `run()` need a server that actually serves that model.**
-// `run()` defaults to `cv-enhance-v3`; pointed at a server that does not run it, those jobs
-// sit queued until the 120s timeout and report as four failures that say nothing about the
-// SDK. This flag is how you say the model is there.
+// Wraps a case that reads a sample image: skipped, with the directory named, when there is
+// no such directory — a missing file is not a failing SDK either.
+const withImages = (name: string, fn: () => Promise<void>) => async () => {
+  if (!HAVE_INPUTS) {
+    console.warn(`skipping "${name}" — no sample images at ${INPUTS_URL.pathname}; set CV_SDK_TEST_INPUTS`);
+    return;
+  }
+  await fn();
+};
+
+// **Two sets of cases call `run()`, against two models, and they are the same three cases.**
+//
+// The `echo` set runs against every server. `echo` is the free model for building against —
+// no credits, no GPU, a real result — and it takes the parameters every enhancing model does
+// (`scale`, `output_format`), so a job built against it is the job a paid model gets. That
+// is what lets these run on any stack, and it is the set that runs in CI.
+//
+// The paid set calls `run()` with its default model, which needs a server with a GPU behind
+// it: pointed at one without, those jobs sit queued until the 120s timeout and report as
+// failures that say nothing about the SDK. This flag is how you say the model is there:
 //
 //   CV_GPU=1 CV_API_KEY=... npm test
+//
+// Both sets send only what the catalog publishes for the model they name. A parameter one
+// model accepts is not a parameter another does — `cv.models()` says which — and a value a
+// model does not publish is refused at submit, whatever it is called.
 const GPU = process.env.CV_GPU === "1";
 
 const gpu = (name: string, fn: () => Promise<void>, timeout = 120_000) =>
@@ -109,38 +132,59 @@ describe("live server", () => {
     }
   });
 
-  gpu("uploads, submits and settles in one call", async () => {
+  gpu("uploads, submits and settles in one call", withImages("uploads, submits and settles in one call", async () => {
     const job = await cv().run(image("0030.jpg", "image/jpeg"), { scale: 4 });
     expect(job.succeeded).toBe(true);
     expect(job.outputUrl).toBeTruthy();
-  });
+  }));
 
-  gpu("returns the same format it was given", async () => {
+  gpu("returns the same format it was given, and downloads it", withImages("returns the same format it was given, and downloads it", async () => {
     // The contract the Python SDK also relies on; drift here would be invisible to
-    // either SDK's own tests.
-    const job = await cv().run(image("0030.jpg", "image/jpeg"), { style: "photo" });
+    // either SDK's own tests. One job for both assertions: every case here mints an
+    // upload URL, and an account may mint ten a minute.
+    const job = await cv().run(image("0030.jpg", "image/jpeg"), { scale: 2 });
     expect(job.contentType).toBe("image/jpeg");
-  });
-
-  gpu("downloads the result", async () => {
-    const job = await cv().run(image("0030.jpg", "image/jpeg"), { style: "photo" });
     const blob = await job.blob();
     expect(blob.size).toBeGreaterThan(1000);
-  });
+  }));
 
-  gpu("surfaces a server-side failure as JobFailed", async () => {
+  gpu("surfaces a server-side failure as JobFailed", withImages("surfaces a server-side failure as JobFailed", async () => {
+    // A JPEG cannot carry transparency, and the service refuses the job rather than
+    // flattening it silently — on every model, so the same case runs against echo below.
     await expect(
-      cv().run(image("children-alpha.png"), { style: "photo", output_format: "jpeg" }),
+      cv().run(image("children-alpha.png"), { scale: 2, output_format: "jpeg" }),
     ).rejects.toBeInstanceOf(JobFailed);
-  });
+  }));
 
-  live("rejects invalid parameters with the server's own message", async () => {
+  // The same four, against the free model, on any server. This is the call the guide to a
+  // first API call makes, and the one to build against before switching the model name.
+  live("echo: uploads, submits and settles in one call", withImages("echo: uploads, submits and settles in one call", async () => {
+    const job = await cv().run(image("0030.jpg", "image/jpeg"), { model: "echo", scale: 2 });
+    expect(job.succeeded).toBe(true);
+    expect(job.outputUrl).toBeTruthy();
+  }));
+
+  live("echo: returns the same format it was given, and downloads it", withImages("echo: returns the same format it was given, and downloads it", async () => {
+    const job = await cv().run(image("0030.jpg", "image/jpeg"), { model: "echo", scale: 2 });
+    expect(job.contentType).toBe("image/jpeg");
+    const blob = await job.blob();
+    expect(blob.size).toBeGreaterThan(1000);
+  }));
+
+  live("echo: surfaces a server-side failure as JobFailed", withImages("echo: surfaces a server-side failure as JobFailed", async () => {
+    await expect(
+      cv().run(image("children-alpha.png"), { model: "echo", scale: 2, output_format: "jpeg" }),
+    ).rejects.toBeInstanceOf(JobFailed);
+  }));
+
+  live("rejects invalid parameters with the server's own message", withImages("rejects invalid parameters with the server's own message", async () => {
     const client = cv();
     const key = await client.upload(image("0030.jpg", "image/jpeg"));
     // A value outside the published enum is refused by the server, and the SDK surfaces
-    // that rather than swallowing it.
-    await expect(client.submit(key, { style: "no-such-style" })).rejects.toThrow(/is not one of/);
-  });
+    // that rather than swallowing it. `output_format` is a parameter every model publishes,
+    // so this holds whatever the default model is.
+    await expect(client.submit(key, { output_format: "no-such-format" })).rejects.toThrow(/is not one of/);
+  }));
 
   quick("iterates job history", async () => {
     // **Makes its own history**, rather than reading whatever the cases above left behind:
@@ -159,14 +203,15 @@ describe("live server", () => {
     expect(new Set(seen).size).toBe(seen.length);
   });
 
-  quick("honors a short wait and still completes afterwards", async () => {
-    // A one-second wait is shorter than any real job, so the submit returns unfinished and
-    // `waitFor` is what carries it the rest of the way — which is the thing under test.
+  quick("honors a short wait and still completes afterwards", withImages("honors a short wait and still completes afterwards", async () => {
+    // No wait at all, so the submit returns the job as it was queued — the quick model is
+    // quick precisely so that any positive wait might finish it — and `waitFor` is what
+    // carries it the rest of the way, which is the thing under test.
     const client = cv();
     const key = await client.upload(image("0030.jpg", "image/jpeg"));
-    const job = await client.submit(key, { model: QUICK_MODEL, wait: 1 });
+    const job = await client.submit(key, { model: QUICK_MODEL, wait: 0 });
     expect(job.done).toBe(false);
     const settled = await client.waitFor(job, 60_000);
     expect(settled.succeeded).toBe(true);
-  });
+  }));
 });

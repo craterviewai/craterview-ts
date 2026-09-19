@@ -31,12 +31,30 @@ const blob = await job.blob();
 API's shape rather than an accident, but it is not something every caller should have to
 reimplement.
 
+Build against `echo` first. It costs no credits, needs no GPU and returns a real result — a
+plain upscale — so the request, the parameters and the response are the ones a paid model
+gives, and your integration needs no change when you switch. When you are ready, swap the
+model name for the one you want.
+
+```ts
+const job = await cv.run(file, {
+  // echo is free, for building against. Swap in a paid model when you are ready —
+  // cv-enhance-v3 to enlarge, cv-restore-v1 to repair, cv-headshot-v1 for portraits.
+  model: "echo",
+  scale: 2, wait: 30,
+});
+const blob = await job.blob();
+```
+
+A parameter one model publishes is not one another accepts — `cv.models()` says which — and
+a value a model does not publish is refused at submit rather than ignored.
+
 ## An API key
 
 Keys begin with `cv_` and are issued from your dashboard.
 
 ```ts
-const cv = new CraterView({ apiKey: process.env.CRATERVIEW_API_KEY });
+const cv = new CraterView({ apiKey: process.env.CV_API_KEY });
 ```
 
 A key carries your whole allowance and does not expire. **Do not ship one to a browser** —
@@ -102,7 +120,8 @@ for (let attempt = 0; attempt < 3; attempt++) {
 Generating a fresh key per attempt defeats the point entirely — the server has nothing to
 match against and every attempt starts its own job. Reusing a key with a *different* body
 is rejected with 409 rather than quietly handing back the earlier result. Claims are kept
-for 24 hours; past that the same key starts new work.
+for as long as the job's record is, which is not deleted; the same key always returns
+the same job.
 
 ## Errors
 
@@ -111,7 +130,7 @@ Everything thrown by this client extends `CraterViewError`, so one `catch` handl
 
 | Class | Meaning |
 |---|---|
-| `RateLimited` | 429. `.retryAfter` is seconds until the window rolls over. |
+| `RateLimited` | 429. `.retryAfter` is seconds to wait: until the window rolls over for the request rate, or a short fixed interval to poll on for the in-flight cap. |
 | `JobFailed` | The job ran and did not succeed. `.message` says what you can do about it; `.errorCode` is the half to branch on. |
 | `CraterViewError` | Everything else, including 4xx and 5xx from the API. |
 
@@ -131,7 +150,7 @@ Every field the API publishes on a job is exposed here.
 | `error` | Set when the job failed. Safe to show a user |
 | `errorCode` | The same fact, as a stable identifier. Branch on this, show the other |
 | `credits` | **What you were billed** |
-| `etaSeconds` | The estimate made at submit. Absent once the job has settled |
+| `etaSeconds` | Seconds until the job is expected to finish, recomputed on every read — it counts down while the job runs. Absent once the job has settled |
 | `community` | True when the job is on the community queue: served after priority work, always taking a share of it, so it never stalls behind paid work |
 | `outputUrl`, `downloadUrl` | The result, presigned. One to display, one to save |
 | `thumbUrl` | A small JPEG of the result, for listings. Null when none was drawn |
@@ -247,7 +266,7 @@ old one. You cannot revoke the key you are calling with.
 ## Everything else
 
 ```ts
-await cv.models();                            // models, parameter schemas, queue depth
+await cv.models();                            // models, parameter schemas, which queue you are on
 await cv.job("job_...");                      // one job by id
 await cv.usage();                             // credit balance, spend and job counts
 

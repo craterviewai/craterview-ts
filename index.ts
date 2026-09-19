@@ -70,11 +70,11 @@ export class CraterViewError extends Error {
  * request rate, and the account's cap on jobs queued or running at the same time, which
  * exists so one caller cannot occupy the whole fleet.
  *
- * `retryAfter` is seconds to wait, and how good a number it is depends on which limit you
- * hit: exact for the rate limit, where it is when the window rolls over, and a hint for
- * the in-flight cap, where a slot frees when one of your own jobs finishes and the server
- * can only quote the model's typical duration. `usage()` reports the cap and what you
- * currently hold against it.
+ * `retryAfter` is seconds to wait, and what it means depends on which limit you hit: for
+ * the rate limit it is when the window rolls over; for the in-flight cap it is a fixed
+ * short interval to poll on, since a slot frees when one of your own jobs finishes and
+ * nothing here predicts that. `usage()` reports the cap and what you currently hold
+ * against it.
  */
 export class RateLimited extends CraterViewError {
   constructor(message: string, readonly retryAfter?: number) {
@@ -276,17 +276,12 @@ export interface ModelInfo {
   reference_fps: number;
   params_schema: Record<string, unknown>;
   /**
-   * Work ahead of you **on the queue your key would use** — not a platform-wide total.
-   * Read it with `community`, which says which queue that is.
-   */
-  queue_depth: number;
-  /**
    * Whether your key's work goes to the community queue, which is served after priority
-   * work and always takes a share of it, so it never stalls behind paid work. False once
-   * the account holds credit.
+   * work and always takes a share of it, so it never stalls behind paid work. False while
+   * the account is paying — holding credit, or on a subscription.
    *
-   * The same field, meaning the same thing, as `Job.community` — these are the two places
-   * the API describes a wait, and they describe it the same way.
+   * The same field, meaning the same thing, as `Job.community`. How long a wait will be
+   * is answered on the job, once you have one — `Job.eta_seconds` — and nowhere else.
    */
   community: boolean;
   /** Of `params_schema`, the ones that apply to still images only. */
@@ -303,7 +298,11 @@ export interface KeyInfo {
   /** When it stopped working, or null while it still does. */
   revoked_at: string | null;
   rate_limit_per_minute: number;
-  /** Whether this is the key you are calling with. It cannot be revoked while it is. */
+  /**
+   * Whether this is the key you are calling with. It cannot be revoked by id while it is;
+   * `endCurrentKey()` (`DELETE /v1/keys/current`) ends it on request, unless it is the
+   * account's only way back in.
+   */
   current: boolean;
 }
 
@@ -317,20 +316,14 @@ export interface NewKey {
   rate_limit_per_minute: number;
 }
 
-/** The body of a callback, once {@link verifyWebhook} has checked it came from us. */
-export interface WebhookEvent {
-  id: string;
-  custom_id: string | null;
-  model: string | null;
-  status: JobStatus;
-  error: string | null;
-  error_code: string | null;
-  community: boolean;
-  credits: number | null;
-  created_at: string | null;
-  finished_at: string | null;
-  result: Record<string, unknown> | null;
-}
+/**
+ * The body of a callback, once {@link verifyWebhook} has checked it came from us.
+ *
+ * A job, delivered rather than fetched: the same fields a read of the job states, under the
+ * same names, every one present and null where it does not apply — so a receiver parses one
+ * shape rather than branching on which keys arrived.
+ */
+export interface WebhookEvent extends Required<JobData> {}
 
 export type JobStatus = "queued" | "running" | "succeeded" | "failed";
 
@@ -552,14 +545,14 @@ export class CraterView {
   }
 
   /**
-   * Available models: parameter schemas, prices, limits, and your queue.
+   * Available models: parameter schemas, prices, limits, and which queue you are on.
    *
    * Prices are published here, so the cost of a job is knowable before submitting it.
    *
-   * Needs a key, and not only because the figures are live: `queue_depth` and `community`
-   * are answered **for the queue your key would use**. The API looks up the account's
-   * balance and reports the queue a job from this key would land in — so two keys asking
-   * at the same moment can get different numbers, and buying credit changes yours.
+   * `community` and the limits are answered **for the queue your key would use**. The API
+   * looks up the account's standing and reports the queue a job from this key would land
+   * in — so two keys asking at the same moment can get different answers, and paying —
+   * credit or a subscription — changes yours.
    *
    * A model that is available is not always listed — a model in trial, or being retired,
    * stays usable by name while absent from this catalog.

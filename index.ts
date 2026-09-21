@@ -18,7 +18,7 @@ import { imageSize } from "image-size";
 // Mirrored from package.json, which is the number a release bumps. It cannot be imported
 // from there — this ships as TypeScript, so the import would have to resolve in the
 // consumer's toolchain — so test/version.test.ts asserts the two agree.
-export const VERSION = "0.3.13";
+export const VERSION = "0.3.16";
 const DEFAULT_BASE_URL = "https://api.craterview.ai";
 // The server rejects a longer wait outright, so asking for one costs a 422 rather than the
 // wait you asked for. `run()` clamps to this rather than letting that happen.
@@ -331,6 +331,13 @@ export interface WebhookEvent extends Required<JobData> {}
 
 export type JobStatus = "queued" | "running" | "succeeded" | "failed";
 
+/** A job's standing with the public gallery: `pending` under review, `approved` once shown. */
+export interface GalleryState {
+  status: "pending" | "approved";
+  /** The submission's id, which is what withdrawing it takes. */
+  post_id: string;
+}
+
 /** The API's job representation, exactly as it arrives. Snake case is the wire's. */
 export interface JobData {
   id: string;
@@ -366,6 +373,18 @@ export interface JobData {
   eta_seconds?: number | null;
   /** Retained past the ordinary expiry because its owner asked, links and all. */
   kept?: boolean;
+  /**
+   * Whether the kept copy includes the image you sent as well as the result. It does when
+   * you kept the job while the original was still there; false when only the result is
+   * kept, and when nothing is.
+   */
+  kept_original?: boolean;
+  /**
+   * Where this job stands with the public gallery, when you have offered it: present while
+   * it is being reviewed or shown, absent or null when it is not offered — including after
+   * you withdraw it.
+   */
+  gallery?: GalleryState | null;
   community?: boolean;
   /**
    * Whether an automated check thought this image may fall outside what the service
@@ -427,6 +446,12 @@ export class Job {
   // checked, and `false` would say it was checked and cleared. The two are different
   // answers and only one of them is true.
   get flagged() { return this.data.flagged ?? null; }
+  /** Retained past the ordinary expiry because you asked. */
+  get kept() { return this.data.kept ?? false; }
+  /** Whether the kept copy holds the image you sent as well as the result. */
+  get keptOriginal() { return this.data.kept_original ?? false; }
+  /** Where this job stands with the public gallery, or null when it is not offered. */
+  get gallery() { return this.data.gallery ?? null; }
   /** The whole answer, including where the file is when there is one. */
   get result() { return this.data.result ?? null; }
   /**

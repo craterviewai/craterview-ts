@@ -1,6 +1,6 @@
 {
   "name": "craterview",
-  "version": "0.3.16",
+  "version": "0.3.18",
   "dependencies": {
     "image-size": "^2.0.4"
   },
@@ -27,6 +27,7 @@
   "devDependencies": {
     "@types/node": "^26.2.0",
     "esbuild": "^0.25.0",
+    "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vitest": "^4.1.11"
   }

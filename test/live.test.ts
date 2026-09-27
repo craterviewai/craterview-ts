@@ -148,15 +148,15 @@ describe("live server", () => {
     expect(blob.size).toBeGreaterThan(1000);
   }));
 
-  gpu("surfaces a server-side failure as JobFailed", withImages("surfaces a server-side failure as JobFailed", async () => {
-    // A JPEG cannot carry transparency, and the service refuses the job rather than
-    // flattening it silently — on every model, so the same case runs against echo below.
-    await expect(
-      cv().run(image("children-alpha.png"), { scale: 2, output_format: "jpeg" }),
-    ).rejects.toBeInstanceOf(JobFailed);
+  gpu("returns the transparency of a JPEG result as its own file", withImages("returns the transparency of a JPEG result as its own file", async () => {
+    // A JPEG cannot carry transparency, so the result is the colour and the transparency
+    // comes back beside it — on every model, so the same case runs against echo below.
+    const job = await cv().run(image("children-alpha.png"), { scale: 2, output_format: "jpeg" });
+    expect(job.contentType).toBe("image/jpeg");
+    expect(job.alphaUrl).toBeTruthy();
   }));
 
-  // The same four, against the free model, on any server. This is the call the guide to a
+  // The same cases, against the free model, on any server. This is the call the guide to a
   // first API call makes, and the one to build against before switching the model name.
   live("echo: uploads, submits and settles in one call", withImages("echo: uploads, submits and settles in one call", async () => {
     const job = await cv().run(image("0030.jpg", "image/jpeg"), { model: "echo", scale: 2 });
@@ -171,9 +171,16 @@ describe("live server", () => {
     expect(blob.size).toBeGreaterThan(1000);
   }));
 
+  live("echo: returns the transparency of a JPEG result as its own file", withImages("echo: returns the transparency of a JPEG result as its own file", async () => {
+    const job = await cv().run(image("children-alpha.png"), { model: "echo", scale: 2, output_format: "jpeg" });
+    expect(job.contentType).toBe("image/jpeg");
+    expect(job.alphaUrl).toBeTruthy();
+  }));
+
   live("echo: surfaces a server-side failure as JobFailed", withImages("echo: surfaces a server-side failure as JobFailed", async () => {
+    // `fail: public` is echo's own way to fail as a mistake in the request does.
     await expect(
-      cv().run(image("children-alpha.png"), { model: "echo", scale: 2, output_format: "jpeg" }),
+      cv().run(image("0030.jpg", "image/jpeg"), { model: "echo", fail: "public" }),
     ).rejects.toBeInstanceOf(JobFailed);
   }));
 

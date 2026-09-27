@@ -8,10 +8,19 @@ npm install craterview
 ```
 
 **The package ships TypeScript source.** `index.ts` is what npm installs — there is no build
-step and no compiled JavaScript in the tarball — so whatever compiles your own TypeScript
-compiles this too: any bundler, `tsx` or `ts-node`, Bun, Deno, or Node 22.6 and newer with
-type stripping (`--experimental-strip-types`, which recent releases enable by default). A
-plain JavaScript project invoking `node` directly cannot import it.
+step and no compiled JavaScript in the tarball — so it needs a toolchain that compiles
+TypeScript inside `node_modules`. Two that do, and are tested against the published package:
+
+```bash
+npx tsx main.ts                  # run a script directly
+
+npx esbuild main.js --bundle --platform=node --format=esm --outfile=main.bundle.mjs
+node main.bundle.mjs             # or bundle first, for plain JavaScript projects
+```
+
+A front-end bundler works the same way, provided its TypeScript step is not configured to
+skip `node_modules`. **Node on its own cannot import it**, type stripping included: Node
+strips types only from your own files and refuses any `.ts` file under `node_modules`.
 
 The code itself needs Node 18 or newer, or any modern browser. **One runtime dependency**,
 [`image-size`](https://www.npmjs.com/package/image-size), pure JavaScript that runs in
@@ -132,7 +141,7 @@ Everything thrown by this client extends `CraterViewError`, so one `catch` handl
 
 | Class | Meaning |
 |---|---|
-| `RateLimited` | 429. `.retryAfter` is seconds to wait: until the window rolls over for the request rate, or a short fixed interval to poll on for the in-flight cap. |
+| `RateLimited` | 429 — one of four limits, and the message says which: the key's request rate, the account's upload URLs a minute, the account's jobs in flight, or a full queue. `.retryAfter` is seconds to wait: until the window rolls over for the two per-minute limits, or an interval to poll on for the other two. |
 | `JobFailed` | The job ran and did not succeed. `.message` says what you can do about it; `.errorCode` is the half to branch on. |
 | `CraterViewError` | Everything else, including 4xx and 5xx from the API. |
 
@@ -156,7 +165,8 @@ Every field the API publishes on a job is exposed here.
 | `community` | True when the job is on the community queue: served after priority work, always taking a share of it, so it never stalls behind paid work |
 | `outputUrl`, `downloadUrl` | The result, presigned. One to display, one to save |
 | `thumbUrl` | A small JPEG of the result, for listings. Null when none was drawn |
-| `inputUrl` | The file you sent. Null once it has expired — inputs go after a day |
+| `inputUrl` | The picture the model worked from — the region, where you named one |
+| `alphaUrl` | Only for a JPEG result of a picture with transparency, which JPEG cannot hold: the transparency as a grayscale JPEG, white where opaque. The result is then the colour alone |
 | `contentType` | The result's media type |
 | `outputBytes` | The result's size in bytes |
 | `blob()`, `arrayBuffer()` | Download the result |
@@ -164,7 +174,7 @@ Every field the API publishes on a job is exposed here.
 `result` is the whole of what the job produced, and the five rows above it that describe the
 file are getters onto `result.output` rather than separate fields — the API states those links
 once. A model with no file to hand back returns its answer in `result` and leaves every one of
-them null.
+them null; the fields it answers with are its `result_schema` in `cv.models()`.
 
 `credits` is the only figure about cost the API states, and the price is fixed and published
 per model, so an invoice reconciles against `credits` alone. For how long a job took, subtract
@@ -176,7 +186,7 @@ accepts exactly that length and nothing else. You do not pass it — it is read 
 in hand, which is what makes it impossible to get wrong.
 
 **Running out of credit does not stop you.** A job submitted against a balance of zero is
-accepted, charged and run — it simply waits in the community queue, which is served after
+accepted and run, and charged when it succeeds — it simply waits in the community queue, which is served after
 paid work and always takes a share of it, so it never stalls behind paid work. It comes back
 with `community` set. There is no payment error to handle:
 paying — with credit, or with a subscription — buys a place at the front of the queue rather
@@ -189,10 +199,12 @@ is signed in, so the second cannot be derived from the first. Both expire, so fe
 result rather than storing the link.
 
 `thumbUrl` and `inputUrl` are for building a job listing: a few-hundred-pixel preview so a
-page of results costs kilobytes, and the original so a result can be shown against what made
-it. They keep very different company on expiry — the preview lives as long as the result,
-while inputs are deleted a day in — so treat a missing `inputUrl` as normal rather than as an
-error.
+page of results costs kilobytes, and the picture the model worked from so a result can be
+shown against it. Where you named a region, `inputUrl` is that region — so a before-and-after
+is a true pair, and what was used is something you can look at rather than something to take
+on trust. It is not the file you uploaded: yours stays yours and is removed on its own
+schedule. Both expire with the result. A model that produces no file has no `thumbUrl`, but still
+has the picture it answered about.
 
 ## Webhooks
 
@@ -268,7 +280,7 @@ old one. You cannot revoke the key you are calling with.
 ## Everything else
 
 ```ts
-await cv.models();                            // models, parameter schemas, which queue you are on
+await cv.models();                            // models, what each takes and answers with, which queue you are on
 await cv.job("job_...");                      // one job by id
 await cv.usage();                             // credit balance, spend and job counts
 

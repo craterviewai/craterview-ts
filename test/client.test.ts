@@ -326,15 +326,15 @@ describe("run", () => {
     stubFetch([
       { body: { input_key: "inputs/abc", upload_url: "http://storage.test/put" } },
       { status: 200 },
-      { body: { id: "job_1", model: "m", status: "failed", error: "alpha not supported",
-                error_code: "jpeg_cannot_carry_alpha" } },
+      { body: { id: "job_1", model: "m", status: "failed", error: "no face was found in the image",
+                error_code: "no_face_found" } },
     ]);
     const failure = await client("k").run(new Blob(["x"])).catch((e) => e);
     expect(failure).toBeInstanceOf(JobFailed);
-    expect(failure.message).toBe("alpha not supported");
+    expect(failure.message).toBe("no face was found in the image");
     // The half a client branches on. `run()` is the ergonomic path and the one the README
     // leads with, so a caller taking it must not be left matching on prose.
-    expect(failure.errorCode).toBe("jpeg_cannot_carry_alpha");
+    expect(failure.errorCode).toBe("no_face_found");
   });
 
   it("accepts a Uint8Array as well as a Blob", async () => {

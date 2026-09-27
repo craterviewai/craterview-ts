@@ -4,7 +4,7 @@
  *   import { CraterView } from "craterview";
  *
  *   const cv = new CraterView({ apiKey: "cv_..." });
- *   const job = await cv.run(file, { style: "photo" });
+ *   const job = await cv.run(file, { scale: 4 });
  *   const blob = await job.blob();
  *
  * One dependency: `image-size`, which reads an image's dimensions from its header — no
@@ -18,7 +18,7 @@ import { imageSize } from "image-size";
 // Mirrored from package.json, which is the number a release bumps. It cannot be imported
 // from there — this ships as TypeScript, so the import would have to resolve in the
 // consumer's toolchain — so test/version.test.ts asserts the two agree.
-export const VERSION = "0.3.16";
+export const VERSION = "0.3.18";
 const DEFAULT_BASE_URL = "https://api.craterview.ai";
 // The server rejects a longer wait outright, so asking for one costs a 422 rather than the
 // wait you asked for. `run()` clamps to this rather than letting that happen.
@@ -35,7 +35,7 @@ const MAX_PAGE = 200;
  *   const key = newIdempotencyKey();          // once, before the first attempt
  *   for (let attempt = 0; attempt < 3; attempt++) {
  *     try {
- *       job = await cv.submit(inputKey, { idempotencyKey: key, style: "photo" });
+ *       job = await cv.submit(inputKey, { idempotencyKey: key, scale: 4 });
  *       break;
  *     } catch (e) {
  *       if (!(e instanceof CraterViewError)) continue;  // same key, at most one job
@@ -70,15 +70,20 @@ export class CraterViewError extends Error {
 }
 
 /**
- * 429 — too fast, or too much at once. Two different limits answer with this: the key's
- * request rate, and the account's cap on jobs queued or running at the same time, which
- * exists so one caller cannot occupy the whole fleet.
+ * 429 — too fast, or too much at once. Four different limits answer with this, and the
+ * message says which:
+ *
+ * - the key's request rate, per minute;
+ * - the account's upload URLs, per minute — counted across all its keys;
+ * - the account's cap on jobs queued or running at the same time, which exists so one
+ *   caller cannot occupy the whole fleet. `usage()` reports the cap and what you currently
+ *   hold against it;
+ * - the queue itself, when it is full and taking no more work. Nothing you sent is wrong;
+ *   an account with credit or a subscription submits on a queue that fills separately.
  *
  * `retryAfter` is seconds to wait, and what it means depends on which limit you hit: for
- * the rate limit it is when the window rolls over; for the in-flight cap it is a fixed
- * short interval to poll on, since a slot frees when one of your own jobs finishes and
- * nothing here predicts that. `usage()` reports the cap and what you currently hold
- * against it.
+ * the two per-minute limits it is when the window rolls over; for the in-flight cap and the
+ * full queue it is an interval to poll on, since nothing here predicts when a slot frees.
  */
 export class RateLimited extends CraterViewError {
   constructor(message: string, readonly retryAfter?: number) {
@@ -92,7 +97,7 @@ export class RateLimited extends CraterViewError {
  *
  * `message` says what you can do about it and `errorCode` is the half to branch on, because
  * the prose is written for a person and gets reworded. `inference_failed` means the fault was
- * ours, the credits were refunded, and the same call is worth making again.
+ * ours, nothing was charged, and the same call is worth making again.
  *
  * An unfamiliar code is a failure with no special handling, not an error in itself: new ones
  * appear as new things become worth telling apart.
@@ -261,10 +266,9 @@ export interface ModelInfo {
    * more tightly than paid work, so these move when `community` below does — check them
    * before uploading rather than learning them from a rejected job.
    *
-   * Two axes, and they are the two a job is made of. `max_frame_megapixels` bounds one
-   * frame, which is what a GPU actually holds, and applies to images too since a still is one
-   * frame. `max_frames` bounds how many frames one job may carry. Zero means that axis is
-   * unbounded for you.
+   * `max_frame_megapixels` bounds one frame you send, and applies to images too since a
+   * still is one frame. `max_frames` bounds how many frames one job may carry. Zero means
+   * that axis is unbounded for you.
    *
    * For a duration, divide: `max_frames / reference_fps` is the longest clip you may send, in
    * seconds. It is not published as its own field on purpose — one limit with two spellings
@@ -273,12 +277,36 @@ export interface ModelInfo {
    */
   max_frame_megapixels: number;
   max_frames: number;
+  /**
+   * The largest frame you may get **back**, in megapixels, and for a model that enlarges it
+   * is the ceiling that decides whether a job runs: what returns is the frame you send
+   * multiplied by the enlargement in each direction, so a modest photograph at a large
+   * enlargement is refused where the same photograph unenlarged is not.
+   *
+   * Check it before uploading:
+   *
+   * ```ts
+   * const result = megapixels * scale ** 2;
+   * if (model.max_output_megapixels && result > model.max_output_megapixels) {
+   *   // send a smaller region of the image, or ask for less enlargement
+   * }
+   * ```
+   *
+   * Sending a smaller region keeps every pixel of what it covers; asking for less
+   * enlargement keeps the whole picture. Zero means this axis is unbounded for you.
+   */
+  max_output_megapixels: number;
   /** Whole credits. The price is flat and knowable before you send anything. */
   credits_per_image: number;
   /** Whole credits. Null means this model takes stills only. */
   credits_per_video_second?: number | null;
   reference_fps: number;
   params_schema: Record<string, unknown>;
+  /**
+   * JSON Schema for the fields a finished job of this model states under `result`, beside
+   * any files it links. Empty for a model whose whole answer is its file.
+   */
+  result_schema: Record<string, unknown>;
   /**
    * Whether your key's work goes to the community queue, which is served after priority
    * work and always takes a share of it, so it never stalls behind paid work. False while
@@ -304,8 +332,8 @@ export interface KeyInfo {
   rate_limit_per_minute: number;
   /**
    * Whether this is the key you are calling with. It cannot be revoked by id while it is;
-   * `endCurrentKey()` (`DELETE /v1/keys/current`) ends it on request, unless it is the
-   * account's only way back in.
+   * `DELETE /v1/keys/current` ends it on request, unless it is the account's only way
+   * back in. This client has no method for that call.
    */
   current: boolean;
 }
@@ -367,18 +395,11 @@ export interface JobData {
    * read them out of `result.output`.
    */
   result?: Record<string, unknown> | null;
-  input_url?: string | null;
   /** Whole credits. TypeScript cannot say integer, but the API only ever sends one. */
   credits?: number | null;
   eta_seconds?: number | null;
   /** Retained past the ordinary expiry because its owner asked, links and all. */
   kept?: boolean;
-  /**
-   * Whether the kept copy includes the image you sent as well as the result. It does when
-   * you kept the job while the original was still there; false when only the result is
-   * kept, and when nothing is.
-   */
-  kept_original?: boolean;
   /**
    * Where this job stands with the public gallery, when you have offered it: present while
    * it is being reviewed or shown, absent or null when it is not offered — including after
@@ -409,11 +430,10 @@ export interface JobData {
  * credential. Both are presigned and expire — fetch the result rather than storing the link.
  *
  * `thumbUrl` is a small JPEG of the result, for showing a page of jobs without downloading
- * a page of full-size outputs. `inputUrl` is the file you sent, so a result can be shown
- * against what it was made from. The two expire on very different clocks: the preview goes
- * with the result, while inputs are deleted after a day — much sooner than the output — so
- * `inputUrl` is null for most of a job's life and code that reads it should expect nothing
- * there.
+ * a page of full-size outputs. `inputUrl` is the picture the model worked from, so a result
+ * can be shown against what it was made from. Both expire with the result. `alphaUrl` is
+ * there only when you asked for a JPEG of a picture with transparency: the transparency, as
+ * a file of its own.
  *
  * `etaSeconds` is the whole of what is reported about waiting: how long until the result,
  * counting time spent waiting for a GPU as well as time spent on one. An estimate and never
@@ -448,8 +468,6 @@ export class Job {
   get flagged() { return this.data.flagged ?? null; }
   /** Retained past the ordinary expiry because you asked. */
   get kept() { return this.data.kept ?? false; }
-  /** Whether the kept copy holds the image you sent as well as the result. */
-  get keptOriginal() { return this.data.kept_original ?? false; }
   /** Where this job stands with the public gallery, or null when it is not offered. */
   get gallery() { return this.data.gallery ?? null; }
   /** The whole answer, including where the file is when there is one. */
@@ -474,7 +492,33 @@ export class Job {
    */
   get downloadUrl() { return (this.output["download_url"] as string) ?? null; }
   get thumbUrl() { return (this.output["thumbnail_url"] as string) ?? null; }
-  get inputUrl() { return this.data.input_url ?? null; }
+  /**
+   * A link to the picture the model worked from. Where you named a region, this is that
+   * region — so what was used is something you can look at rather than something to take on
+   * trust. It is not the file you uploaded: yours stays yours and is removed on its own
+   * schedule.
+   *
+   * Null for a job that has not finished. A model that answers about a picture rather than
+   * producing one has it too: it is the picture that answer is about.
+   */
+  get inputUrl() {
+    const given = (this.data.result ?? {})["input"];
+    return (given && typeof given === "object")
+      ? ((given as Record<string, unknown>)["url"] as string) ?? null
+      : null;
+  }
+  /**
+   * The transparency of a result you asked for as JPEG, which cannot hold it: a grayscale
+   * JPEG the size of the result, white where it is opaque and black where it is transparent.
+   * The result is then the colour alone, not placed on any background, so the two together
+   * are the picture. Null for every other result.
+   */
+  get alphaUrl() {
+    const mask = (this.data.result ?? {})["alpha"];
+    return (mask && typeof mask === "object")
+      ? ((mask as Record<string, unknown>)["url"] as string) ?? null
+      : null;
+  }
   get contentType() { return (this.output["content_type"] as string) ?? null; }
   get outputBytes() { return (this.output["bytes"] as number) ?? null; }
 
@@ -714,9 +758,9 @@ export class CraterView {
   /**
    * The account's credit balance, what it has spent, and what is in flight.
    *
-   * All-time, not monthly: credits are granted and deplete rather than renewing. Counts
-   * committed work rather than completed, so a queued job is already in the figures —
-   * otherwise this and the balance a submission is checked against would disagree.
+   * All-time, not monthly: credits are granted and deplete rather than renewing. A job is
+   * charged when it succeeds, so queued and running work is not in the figures yet, and a
+   * failed job costs nothing.
    *
    * `credits_remaining` is always a number, floored at zero. `jobs_in_flight` and
    * `max_jobs_in_flight` are the state of the queue and are what a 429 on submit is about.

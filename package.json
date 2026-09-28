@@ -1,6 +1,6 @@
 {
   "name": "craterview",
-  "version": "0.3.18",
+  "version": "0.3.19",
   "dependencies": {
     "image-size": "^2.0.4"
   },

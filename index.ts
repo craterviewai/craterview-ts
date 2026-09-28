@@ -18,7 +18,7 @@ import { imageSize } from "image-size";
 // Mirrored from package.json, which is the number a release bumps. It cannot be imported
 // from there — this ships as TypeScript, so the import would have to resolve in the
 // consumer's toolchain — so test/version.test.ts asserts the two agree.
-export const VERSION = "0.3.18";
+export const VERSION = "0.3.19";
 const DEFAULT_BASE_URL = "https://api.craterview.ai";
 // The server rejects a longer wait outright, so asking for one costs a 422 rather than the
 // wait you asked for. `run()` clamps to this rather than letting that happen.
@@ -395,6 +395,12 @@ export interface JobData {
    * read them out of `result.output`.
    */
   result?: Record<string, unknown> | null;
+  /**
+   * A small JPEG of the job's picture, for a listing: the result, or the image the model
+   * worked from when it produced no file. Absent until the job succeeds, where none could be
+   * drawn, and once the job's pictures are deleted.
+   */
+  thumbnail_url?: string | null;
   /** Whole credits. TypeScript cannot say integer, but the API only ever sends one. */
   credits?: number | null;
   eta_seconds?: number | null;
@@ -423,17 +429,18 @@ export interface JobData {
  * by the same names.
  *
  * `result` is the whole of what the job produced. Where the model wrote a file,
- * `result.output` carries its links, and `outputUrl` / `downloadUrl` / `thumbUrl` /
+ * `result.output` carries its links, and `outputUrl` / `downloadUrl` /
  * `contentType` / `outputBytes` read out of it. `outputUrl` and `downloadUrl` are the same
  * object signed two ways: one to display, one to hand a person as a file. The disposition
  * is signed in, so the second cannot be derived from the first without the storage
  * credential. Both are presigned and expire — fetch the result rather than storing the link.
  *
- * `thumbUrl` is a small JPEG of the result, for showing a page of jobs without downloading
- * a page of full-size outputs. `inputUrl` is the picture the model worked from, so a result
- * can be shown against what it was made from. Both expire with the result. `alphaUrl` is
- * there only when you asked for a JPEG of a picture with transparency: the transparency, as
- * a file of its own.
+ * `thumbnailUrl` is a small JPEG of the job's picture — the result, or the image the model
+ * worked from when it produced no file — for showing a page of jobs without downloading a
+ * page of full-size pictures. `inputUrl` is the picture the model worked from, so a result
+ * can be shown against what it was made from. Both expire with the job's other pictures.
+ * `alphaUrl` is there only when you asked for a JPEG of a picture with transparency: the
+ * transparency, as a file of its own.
  *
  * `etaSeconds` is the whole of what is reported about waiting: how long until the result,
  * counting time spent waiting for a GPU as well as time spent on one. An estimate and never
@@ -468,6 +475,8 @@ export class Job {
   get flagged() { return this.data.flagged ?? null; }
   /** Retained past the ordinary expiry because you asked. */
   get kept() { return this.data.kept ?? false; }
+  /** A small JPEG of the job's picture, for a listing. Null where there is none. */
+  get thumbnailUrl() { return this.data.thumbnail_url ?? null; }
   /** Where this job stands with the public gallery, or null when it is not offered. */
   get gallery() { return this.data.gallery ?? null; }
   /** The whole answer, including where the file is when there is one. */
@@ -491,7 +500,6 @@ export class Job {
    * the disposition is signed in, so re-signing needs the storage credential.
    */
   get downloadUrl() { return (this.output["download_url"] as string) ?? null; }
-  get thumbUrl() { return (this.output["thumbnail_url"] as string) ?? null; }
   /**
    * A link to the picture the model worked from. Where you named a region, this is that
    * region — so what was used is something you can look at rather than something to take on

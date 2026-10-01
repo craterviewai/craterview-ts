@@ -141,7 +141,7 @@ describe.skipIf(!shared)("wire contract: account", () => {
       const isDelete = testCase.expect.method === "DELETE";
       const calls = stub(isDelete ? 204 : 200, {
         secret: "cvwh_x", id: "key_1", key: "cv_x", prefix: "cv_x",
-        name: "api", rate_limit_per_minute: 60,
+        name: "api", rate_limit_per_minute: 60, data: [], has_more: false,
       });
 
       const cv = new CraterView({ apiKey: "k", baseUrl: "http://gateway.test" });

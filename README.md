@@ -136,12 +136,16 @@ the same job.
 
 ## Errors
 
-Everything thrown by this client extends `CraterViewError`, so one `catch` handles the lot.
-`.status` carries the HTTP status where there was one.
+Every answer the API or storage gives that is not a success is thrown as a
+`CraterViewError`. `.status` carries the HTTP status where there was one, and `.traceId` the
+API's `X-Trace-Id` for a request it answered and refused — the id to quote when you ask us
+about it. A request that got
+no answer at all throws the runtime's own error from `fetch`, which is how the retry loop
+above tells the two apart.
 
 | Class | Meaning |
 |---|---|
-| `RateLimited` | 429 — one of four limits, and the message says which: the key's request rate, the account's upload URLs a minute, the account's jobs in flight, or a full queue. `.retryAfter` is seconds to wait: until the window rolls over for the two per-minute limits, or an interval to poll on for the other two. |
+| `RateLimited` | 429 — one of five limits, and the message says which: the key's request rate, the account's upload URLs a minute, the account's new keys an hour, the account's jobs in flight, or a full queue. `.retryAfter` is seconds to wait: until the window rolls over for the two per-minute limits, until a new key can be made for the hourly one, or an interval to poll on for the other two. |
 | `JobFailed` | The job ran and did not succeed. `.message` says what you can do about it; `.errorCode` is the half to branch on. |
 | `CraterViewError` | Everything else, including 4xx and 5xx from the API. |
 
@@ -162,7 +166,7 @@ Every field the API publishes on a job is exposed here.
 | `errorCode` | The same fact, as a stable identifier. Branch on this, show the other |
 | `credits` | **What you were billed** |
 | `etaSeconds` | Seconds until the job is expected to finish, recomputed on every read — it counts down while the job runs. Absent once the job has settled. Estimated for your image's size when `upload()` could read it (or when you pass `inputMegapixels` to `submit()`), for a typical image otherwise |
-| `community` | True when the job is on the community queue: served after priority work, always taking a share of it, so it never stalls behind paid work |
+| `community` | True when the job is on the community queue, which runs on shared, free capacity and can wait longer at busy times |
 | `outputUrl`, `downloadUrl` | The result, presigned. One to display, one to save |
 | `thumbnailUrl` | A small JPEG of the job's picture, for listings — the result, or what the model worked from when it produced no file. Null when none was drawn |
 | `inputUrl` | The picture the model worked from — the region, where you named one |
@@ -186,11 +190,11 @@ accepts exactly that length and nothing else. You do not pass it — it is read 
 in hand, which is what makes it impossible to get wrong.
 
 **Running out of credit does not stop you.** A job submitted against a balance of zero is
-accepted and run, and charged when it succeeds — it simply waits in the community queue, which is served after
-paid work and always takes a share of it, so it never stalls behind paid work. It comes back
-with `community` set. There is no payment error to handle:
-paying — with credit, or with a subscription — buys a place at the front of the queue rather
-than the right to submit.
+accepted and run, and charged when it succeeds — it goes to the community queue, which runs
+on shared, free capacity and can wait longer at busy times. It comes back with `community`
+set. There is no payment error to handle: paying — with credit, or with a subscription —
+moves work onto paid compute that scales with demand, rather than buying the right to
+submit.
 `etaSeconds` covers the whole wait, queue time included, so a community job simply reports
 a longer one.
 
@@ -299,10 +303,14 @@ fetched as 200.
 new CraterView({
   apiKey: undefined,
   baseUrl: "https://api.craterview.ai",
+  timeoutMs: 60_000,
 });
 ```
 
-`baseUrl` is what you change to point at a local server.
+`baseUrl` is what you change to point at a local server. `timeoutMs` is how long to wait for
+the API to answer before giving up with the runtime's `TimeoutError` — nothing answered, so
+it is a request to repeat with the same idempotency key. Uploads and downloads go to storage
+and have five minutes.
 
 ## From Claude Code
 

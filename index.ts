@@ -18,7 +18,7 @@ import { imageSize } from "image-size";
 // Mirrored from package.json, which is the number a release bumps. It cannot be imported
 // from there — this ships as TypeScript, so the import would have to resolve in the
 // consumer's toolchain — so test/version.test.ts asserts the two agree.
-export const VERSION = "0.3.19";
+export const VERSION = "0.4.0";
 const DEFAULT_BASE_URL = "https://api.craterview.ai";
 // The server rejects a longer wait outright, so asking for one costs a 422 rather than the
 // wait you asked for. `run()` clamps to this rather than letting that happen.
@@ -62,18 +62,25 @@ export function newIdempotencyKey(): string {
   return `idem_${base64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")}`;
 }
 
+/**
+ * `status` is the HTTP status where there was one. `traceId` is the API's `X-Trace-Id` for a
+ * request it answered and refused — the id to quote when asking about it. Absent when the
+ * refusal came from storage rather than the API.
+ */
 export class CraterViewError extends Error {
-  constructor(message: string, readonly status?: number) {
+  constructor(message: string, readonly status?: number, readonly traceId?: string) {
     super(message);
     this.name = "CraterViewError";
   }
 }
 
 /**
- * 429 — too fast, or too much at once. Four different limits answer with this, and the
+ * 429 — too fast, or too much at once. Five different limits answer with this, and the
  * message says which:
  *
  * - the key's request rate, per minute;
+ * - the account's new keys, per hour — counted across all its keys, and only from
+ *   `createKey`;
  * - the account's upload URLs, per minute — counted across all its keys;
  * - the account's cap on jobs queued or running at the same time, which exists so one
  *   caller cannot occupy the whole fleet. `usage()` reports the cap and what you currently
@@ -82,12 +89,13 @@ export class CraterViewError extends Error {
  *   an account with credit or a subscription submits on a queue that fills separately.
  *
  * `retryAfter` is seconds to wait, and what it means depends on which limit you hit: for
- * the two per-minute limits it is when the window rolls over; for the in-flight cap and the
- * full queue it is an interval to poll on, since nothing here predicts when a slot frees.
+ * the two per-minute limits it is when the window rolls over; for new keys, when the account
+ * may be given another; for the in-flight cap and the full queue it is an interval to poll
+ * on, since nothing here predicts when a slot frees.
  */
 export class RateLimited extends CraterViewError {
-  constructor(message: string, readonly retryAfter?: number) {
-    super(message, 429);
+  constructor(message: string, readonly retryAfter?: number, traceId?: string) {
+    super(message, 429, traceId);
     this.name = "RateLimited";
   }
 }
@@ -308,9 +316,9 @@ export interface ModelInfo {
    */
   result_schema: Record<string, unknown>;
   /**
-   * Whether your key's work goes to the community queue, which is served after priority
-   * work and always takes a share of it, so it never stalls behind paid work. False while
-   * the account is paying — holding credit, or on a subscription.
+   * Whether your key's work goes to the community queue, which runs on shared, free capacity
+   * and can wait longer at busy times. False while the account is paying — holding credit, or
+   * on a subscription — which puts its work on paid compute that scales with demand.
    *
    * The same field, meaning the same thing, as `Job.community`. How long a wait will be
    * is answered on the job, once you have one — `Job.eta_seconds` — and nowhere else.
@@ -328,7 +336,7 @@ export interface KeyInfo {
   name: string;
   created_at: string | null;
   /** When it stopped working, or null while it still does. */
-  revoked_at: string | null;
+  revoked_at?: string;
   rate_limit_per_minute: number;
   /**
    * Whether this is the key you are calling with. It cannot be revoked by id while it is;
@@ -446,12 +454,13 @@ export interface JobData {
  * counting time spent waiting for a GPU as well as time spent on one. An estimate and never
  * a promise — read it as guidance, not a deadline. Absent once a job has settled.
  *
- * `community` says the job is on the queue served after priority work, which always takes
- * a share of it rather than only what is left over — so it waits longer at busy times and
- * never stalls behind paid work. That is where an account goes when it has not
- * paid for priority — by holding credit or by subscribing. Nothing is refused for want of
- * either: paying buys a place at the front of the queue, not the right to submit, so an
- * account that has not paid means a longer wait and never an error.
+ * `community` says the job is on the community queue, which runs on shared, free capacity —
+ * so it waits longer at busy times, and never stops. That is where an account's work goes
+ * when it is not paying, by holding credit or by subscribing. An empty balance is never itself
+ * a reason to refuse a job — paying moves work onto paid compute that scales with demand, not
+ * the right to submit — but on some models the community queue takes smaller files.
+ * `models()` lists each model's limits for your key, and a file over them is refused with
+ * the limit named.
  */
 export class Job {
   constructor(private readonly data: JobData) {}
@@ -551,8 +560,10 @@ export class Job {
     if (!url) {
       throw new CraterViewError(`job ${this.id} has no result (status ${this.status})`);
     }
-    const resp = await fetch(url);
-    if (!resp.ok) throw new CraterViewError(`downloading result failed: ${resp.status}`);
+    const resp = await fetch(url, { signal: AbortSignal.timeout(TRANSFER_TIMEOUT_MS) });
+    if (!resp.ok) {
+      throw new CraterViewError(`downloading result failed: ${resp.status}`, resp.status);
+    }
     return await resp.blob();
   }
 
@@ -564,7 +575,17 @@ export class Job {
 export interface CraterViewOptions {
   apiKey?: string;
   baseUrl?: string;
+  /**
+   * Milliseconds to wait for the API to answer a request before giving up, 60 000 by default.
+   * A request that times out throws the runtime's `TimeoutError`, not a `CraterViewError`:
+   * nothing answered, so it is one to repeat with the same idempotency key. Uploads and
+   * downloads go to storage and are given five minutes whatever this says.
+   */
+  timeoutMs?: number;
 }
+
+/** How long a transfer to or from storage may take, however large the picture. */
+const TRANSFER_TIMEOUT_MS = 300_000;
 
 /**
  * Width × height ÷ 10⁶ from the file's header, or `undefined` for a file the reader does not
@@ -613,6 +634,7 @@ export interface SubmitOptions {
 export class CraterView {
   private readonly baseUrl: string;
   private readonly headers: Record<string, string>;
+  private readonly timeoutMs: number;
   // What `upload()` read from each file's header, by the key it came back with, so a later
   // `submit()` of that key declares the size without the caller carrying it. Bounded: a
   // long-lived client uploading thousands of files keeps the most recent few hundred.
@@ -620,6 +642,7 @@ export class CraterView {
 
   constructor(options: CraterViewOptions = {}) {
     this.baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/$/, "");
+    this.timeoutMs = options.timeoutMs ?? 60_000;
     this.headers = { "User-Agent": `craterview-ts/${VERSION}` };
     if (options.apiKey) this.headers["Authorization"] = `Bearer ${options.apiKey}`;
   }
@@ -627,6 +650,7 @@ export class CraterView {
   private async request<T>(method: string, path: string, body?: unknown,
                            extraHeaders: Record<string, string> = {}): Promise<T> {
     const resp = await fetch(`${this.baseUrl}${path}`, {
+      signal: AbortSignal.timeout(this.timeoutMs),
       method,
       headers: { ...this.headers, ...extraHeaders,
                  ...(body ? { "Content-Type": "application/json" } : {}) },
@@ -635,10 +659,11 @@ export class CraterView {
 
     if (!resp.ok) {
       const detail = await this.detail(resp);
+      const traceId = resp.headers.get("X-Trace-Id") ?? undefined;
       if (resp.status === 429) {
-        throw new RateLimited(detail, Number(resp.headers.get("Retry-After") ?? 0));
+        throw new RateLimited(detail, Number(resp.headers.get("Retry-After") ?? 0), traceId);
       }
-      throw new CraterViewError(detail, resp.status);
+      throw new CraterViewError(detail, resp.status, traceId);
     }
     // A 204 carries no body, so asking for JSON throws on a call that succeeded.
     if (resp.status === 204) return undefined as T;
@@ -693,9 +718,10 @@ export class CraterView {
       "POST", "/v1/uploads", { content_type: type, content_length: blob.size });
 
     const put = await fetch(slot.upload_url, {
+      signal: AbortSignal.timeout(TRANSFER_TIMEOUT_MS),
       method: "PUT", body: blob, headers: { "Content-Type": type },
     });
-    if (!put.ok) throw new CraterViewError(`upload failed: ${put.status}`);
+    if (!put.ok) throw new CraterViewError(`upload failed: ${put.status}`, put.status);
     const megapixels = await megapixelsOf(blob);
     if (megapixels) {
       if (this.sizes.size >= 512) this.sizes.delete(this.sizes.keys().next().value!);
@@ -803,9 +829,24 @@ export class CraterView {
     return body.secret;
   }
 
-  /** Every key on the account, including revoked ones, by prefix rather than value. */
+  /**
+   * Every key on the account, including revoked ones, by prefix rather than value, newest
+   * first. The API serves the list a page at a time; this fetches every page and returns them
+   * together.
+   */
   async keys(): Promise<KeyInfo[]> {
-    return await this.request("GET", "/v1/keys") as KeyInfo[];
+    const found: KeyInfo[] = [];
+    let before: string | undefined;
+    for (;;) {
+      const params = new URLSearchParams({ limit: String(MAX_PAGE) });
+      if (before) params.set("before", before);
+      const page = await this.request<{ data: KeyInfo[]; has_more: boolean; next_before?: string }>(
+        "GET", `/v1/keys?${params}`);
+      found.push(...page.data);
+      // As in `jobs`: a missing or non-advancing cursor stops rather than spinning.
+      if (!page.has_more || !page.next_before || page.next_before === before) return found;
+      before = page.next_before;
+    }
   }
 
   /**
@@ -815,6 +856,9 @@ export class CraterView {
    * Several keys on an account is the ordinary arrangement, one per service or environment.
    * They share the account's credits and history. This is also how you rotate without
    * downtime: create the new key, move your clients onto it, then revoke the old one.
+   *
+   * An account is given a limited number of new keys an hour, whichever of its keys asks:
+   * past it this throws `RateLimited`, whose `retryAfter` says when to ask again.
    */
   async createKey(name = "api"): Promise<NewKey> {
     return await this.request("POST", "/v1/keys", { name }) as NewKey;
@@ -823,8 +867,9 @@ export class CraterView {
   /**
    * Stop a key working. Immediate, and not reversible.
    *
-   * You cannot revoke the key this client is authenticating with — the call would succeed
-   * and leave you unable to make another.
+   * You cannot revoke the key this client is authenticating with: it is refused with status
+   * 409, because it would leave you unable to make another. Create a replacement, move onto
+   * it, then revoke this one.
    */
   async revokeKey(keyId: string): Promise<void> {
     await this.request("DELETE", `/v1/keys/${encodeURIComponent(keyId)}`);

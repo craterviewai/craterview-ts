@@ -102,7 +102,87 @@ describe("request construction", () => {
   });
 });
 
+describe("a request that never answers", () => {
+  // A socket that accepts and never replies used to hold the caller's await for as long as the
+  // runtime allowed — five minutes under Node, for ever in a browser — while the Python client
+  // gave up at sixty seconds. `waitFor`'s own deadline cannot help while one read is stuck.
+  function silentFetch() {
+    const signals: (AbortSignal | undefined)[] = [];
+    vi.stubGlobal("fetch", (_url: string | URL, init: RequestInit = {}) => {
+      signals.push(init.signal ?? undefined);
+      return new Promise((_resolve, reject) => {
+        init.signal?.addEventListener("abort", () => reject(init.signal!.reason));
+      });
+    });
+    return signals;
+  }
+
+  it("gives up at the client's timeout, as the runtime's error the retry loop repeats", async () => {
+    silentFetch();
+    const cv = new CraterView({ apiKey: "k", baseUrl: "http://gateway.test", timeoutMs: 50 });
+    const started = Date.now();
+    const failure = await cv.models().catch((e: unknown) => e);
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect((failure as Error).name).toBe("TimeoutError");
+    expect(failure).not.toBeInstanceOf(CraterViewError);
+  });
+
+  it("bounds every request it makes by default, storage transfers included", async () => {
+    const cv = new CraterView({ apiKey: "k", baseUrl: "http://gateway.test" });
+    let calls = stubFetch([
+      { body: { input_key: "inputs/abc", upload_url: "http://storage.test/put" } },
+      { status: 200 },
+    ]);
+    await cv.upload(new Blob(["x"], { type: "image/png" }), "image/png");
+    expect(calls.map((c) => c.init.signal)).toEqual(
+      [expect.any(AbortSignal), expect.any(AbortSignal)]);          // the API, then storage
+
+    calls = stubFetch([
+      { body: { id: "job_1", model: "cv-enhance-v3", status: "succeeded",
+                result: { output: { url: "http://storage.test/out" } } } },
+      { status: 200, body: {} },
+    ]);
+    await (await cv.job("job_1")).blob();
+    expect(calls[1]!.init.signal).toEqual(expect.any(AbortSignal));  // the download
+  });
+});
+
 describe("error mapping", () => {
+  it("carries the status when storage refuses an upload or a download", async () => {
+    // The README says `.status` carries the HTTP status where there was one. Storage answers
+    // these two, and a 403 (a signature that no longer matches) is the one worth branching on.
+    stubFetch([
+      { body: { input_key: "inputs/abc", upload_url: "http://storage.test/put" } },
+      { status: 403 },
+    ]);
+    const cv = new CraterView({ apiKey: "k", baseUrl: "http://gateway.test" });
+    await expect(cv.upload(new Blob(["x"], { type: "image/png" }), "image/png"))
+      .rejects.toMatchObject({ name: "CraterViewError", status: 403 });
+
+    stubFetch([
+      { body: { id: "job_1", model: "cv-enhance-v3", status: "succeeded",
+                result: { output: { url: "http://storage.test/out" } } } },
+      { status: 403 },
+    ]);
+    const job = await cv.job("job_1");
+    await expect(job.blob()).rejects.toMatchObject({ name: "CraterViewError", status: 403 });
+  });
+
+  it("carries the trace id the first-call guide says to quote", async () => {
+    // The guide tells a reader to quote `X-Trace-Id` for a request the API refused. A caller of
+    // this client never sees a header, so the error has to carry it.
+    stubFetch([
+      { status: 404, body: { detail: "no job" }, headers: { "x-trace-id": "4bf92f35" } },
+      { status: 429, body: { detail: "slow" },
+        headers: { "x-trace-id": "a3ce929d", "Retry-After": "7" } },
+    ]);
+    const cv = new CraterView({ apiKey: "k", baseUrl: "http://gateway.test" });
+    await expect(cv.job("job_x")).rejects.toMatchObject({ status: 404, traceId: "4bf92f35" });
+    await expect(cv.models()).rejects.toMatchObject({
+      name: "RateLimited", retryAfter: 7, traceId: "a3ce929d",
+    });
+  });
+
   it("maps 429 to RateLimited and parses Retry-After", async () => {
     stubFetch([{ status: 429, body: { detail: "slow down" }, headers: { "Retry-After": "42" } }]);
     await expect(client("k").models()).rejects.toMatchObject({
@@ -111,8 +191,8 @@ describe("error mapping", () => {
   });
 
   it("maps a 402 from an older server to the base error", async () => {
-    // Nothing is refused for want of credit, so this client declares no type for it. A
-    // caller pointed at a deployment that does refuse must still get something catchable.
+    // No request is refused with 402 Payment Required, so this client declares no type for
+    // it. A caller pointed at a deployment that does refuse must still get something catchable.
     stubFetch([{ status: 402, body: { detail: "quota exhausted" } }]);
     await expect(client("k").models()).rejects.toMatchObject({
       name: "CraterViewError", status: 402,

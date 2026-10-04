@@ -18,7 +18,7 @@ import { imageSize } from "image-size";
 // Mirrored from package.json, which is the number a release bumps. It cannot be imported
 // from there — this ships as TypeScript, so the import would have to resolve in the
 // consumer's toolchain — so test/version.test.ts asserts the two agree.
-export const VERSION = "0.4.8";
+export const VERSION = "0.4.9";
 const DEFAULT_BASE_URL = "https://api.craterview.ai";
 // The server rejects a longer wait outright, so asking for one costs a 422 rather than the
 // wait you asked for. `run()` clamps to this rather than letting that happen.
@@ -264,8 +264,8 @@ export interface ModelInfo {
    */
   video_coming_soon?: boolean;
   /**
-   * How long this model is for. `fixed` is a lasting part of the service; `comet` is a
-   * featured model that may be withdrawn at short notice, so build on it knowing that.
+   * What kind of model this is. `fixed` is a lasting part of the service; `comet` is a
+   * utility or fun experiment.
    */
   tenure?: "fixed" | "comet";
   max_input_bytes: number;

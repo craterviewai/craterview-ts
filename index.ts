@@ -18,7 +18,7 @@ import { imageSize } from "image-size";
 // Mirrored from package.json, which is the number a release bumps. It cannot be imported
 // from there — this ships as TypeScript, so the import would have to resolve in the
 // consumer's toolchain — so test/version.test.ts asserts the two agree.
-export const VERSION = "0.4.9";
+export const VERSION = "0.4.10";
 const DEFAULT_BASE_URL = "https://api.craterview.ai";
 // The server rejects a longer wait outright, so asking for one costs a 422 rather than the
 // wait you asked for. `run()` clamps to this rather than letting that happen.
@@ -422,8 +422,9 @@ export interface JobData {
   gallery?: GalleryState | null;
   community?: boolean;
   /**
-   * Whether an automated check thought this image may fall outside what the service
-   * allows. Absent means it was not checked.
+   * Whether an automated check thought this job's images may fall outside what the
+   * service allows: the one you sent, and for some jobs the one that came back. Absent
+   * means they were not all checked.
    */
   flagged?: boolean | null;
 }

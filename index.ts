@@ -18,7 +18,7 @@ import { imageSize } from "image-size";
 // Mirrored from package.json, which is the number a release bumps. It cannot be imported
 // from there — this ships as TypeScript, so the import would have to resolve in the
 // consumer's toolchain — so test/version.test.ts asserts the two agree.
-export const VERSION = "0.4.13";
+export const VERSION = "0.4.16";
 const DEFAULT_BASE_URL = "https://api.craterview.ai";
 // The server rejects a longer wait outright, so asking for one costs a 422 rather than the
 // wait you asked for. `run()` clamps to this rather than letting that happen.
@@ -304,6 +304,14 @@ export interface ModelInfo {
    * enlargement keeps the whole picture. Zero means this axis is unbounded for you.
    */
   max_output_megapixels: number;
+  /**
+   * The most of a picture this model works on in one job, in megapixels: the region you
+   * name with `roi`, or the whole image. Where it is set it binds at every enlargement, so
+   * the largest frame you may send is the smaller of this and `max_output_megapixels`
+   * divided by the square of the enlargement — and asking for less enlargement does not
+   * help with it, where a smaller region does. Zero means this axis is unbounded for you.
+   */
+  max_input_megapixels: number;
   /** Whole credits. The price is flat and knowable before you send anything. */
   credits_per_image: number;
   /** Whole credits. Null means this model takes stills only. */

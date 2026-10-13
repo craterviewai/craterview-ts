@@ -3,14 +3,16 @@
  *
  * Stubbed tests prove the client sends what we think it sends; only this proves the
  * server agrees. Point CV_BASE_URL at one and set CV_API_KEY; every case skips by itself
- * when there is nothing there to answer.
+ * when there is nothing there to answer, and is counted as skipped — never as passed.
  *
  * **Published with the package.** This file goes to the public repository, so write it
  * for someone who has this package and nothing else — never how the service is built.
  */
 
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, type TestContext } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
+import { resolve, sep } from "node:path";
+import { pathToFileURL } from "node:url";
 import { CraterView, JobFailed } from "../index";
 
 const BASE_URL = process.env.CV_BASE_URL ?? "http://localhost:8000";
@@ -22,11 +24,18 @@ const BASE_URL = process.env.CV_BASE_URL ?? "http://localhost:8000";
 // Absent, these skip with the same message the unreachable-server path gives, because "not
 // configured" and "not running" deserve the same treatment: neither is a failing SDK.
 const API_KEY = process.env.CV_API_KEY ?? "";
-// Sample images for the live cases, outside this package. Point CV_SDK_TEST_INPUTS at a
-// directory of your own; the cases that need one skip when it is not there, and say where
-// they looked.
-const INPUTS = process.env.CV_SDK_TEST_INPUTS ?? "../../../../sample-inputs";
-const INPUTS_URL = new URL(`${INPUTS}/`, import.meta.url);
+// Sample images for the live cases, outside this package. CV_SDK_TEST_INPUTS names a directory
+// of your own, relative to where the suite is run, as any path in the environment is. Unset, a
+// directory beside the repository is looked for, and the cases that need one skip when it is
+// not there, saying where they looked. Set, it must name a directory: a path that names
+// nothing is a mistake, and turning every case that needs it into a skip would hide it.
+const INPUTS = process.env.CV_SDK_TEST_INPUTS;
+const INPUTS_URL = INPUTS
+  ? pathToFileURL(`${resolve(INPUTS)}${sep}`)
+  : new URL("../../../../sample-inputs/", import.meta.url);
+if (INPUTS && !existsSync(INPUTS_URL)) {
+  throw new Error(`CV_SDK_TEST_INPUTS is ${INPUTS}, which names no directory from ${process.cwd()}`);
+}
 const HAVE_INPUTS = existsSync(INPUTS_URL);
 
 // Two cases below need a job that finishes quickly and needs no particular hardware, and do
@@ -56,14 +65,23 @@ function image(name: string, type = "image/png"): Blob {
   return new Blob([readFileSync(new URL(name, INPUTS_URL))], { type });
 }
 
+type Case = (ctx: TestContext) => Promise<void>;
+
+// **A case that cannot run here is skipped, and counted as skipped.** It used to return early,
+// and was then reported as passed: a run with nothing behind it read "11 passed". The reason
+// is said as well as given to the runner, so a person reading the output sees why.
+function skip(ctx: TestContext, name: string, why: string): never {
+  console.warn(`skipping "${name}" — ${why}`);
+  return ctx.skip(why) as never;
+}
+
 // Wraps a case that reads a sample image: skipped, with the directory named, when there is
 // no such directory — a missing file is not a failing SDK either.
-const withImages = (name: string, fn: () => Promise<void>) => async () => {
+const withImages = (name: string, fn: Case): Case => async (ctx) => {
   if (!HAVE_INPUTS) {
-    console.warn(`skipping "${name}" — no sample images at ${INPUTS_URL.pathname}; set CV_SDK_TEST_INPUTS`);
-    return;
+    skip(ctx, name, `no sample images at ${INPUTS_URL.pathname}; set CV_SDK_TEST_INPUTS`);
   }
-  await fn();
+  await fn(ctx);
 };
 
 // **Two sets of cases call `run()`, against two models, and they are the same three cases.**
@@ -84,40 +102,28 @@ const withImages = (name: string, fn: () => Promise<void>) => async () => {
 // model does not publish is refused at submit, whatever it is called.
 const GPU = process.env.CV_GPU === "1";
 
-const gpu = (name: string, fn: () => Promise<void>, timeout = 120_000) =>
-  it(name, async () => {
-    if (!GPU) {
-      console.warn(`skipping "${name}" — needs a server running that model; set CV_GPU=1`);
-      return;
-    }
-    if (!reachable) {
-      console.warn(`skipping "${name}" — nothing reachable at ${BASE_URL}`);
-      return;
-    }
-    await fn();
+const gpu = (name: string, fn: Case, timeout = 120_000) =>
+  it(name, async (ctx) => {
+    if (!GPU) skip(ctx, name, "needs a server running that model; set CV_GPU=1");
+    if (!reachable) skip(ctx, name, `nothing reachable at ${BASE_URL}`);
+    await fn(ctx);
   }, timeout);
 
 // As `live`, and additionally skipped when no quick model has been named.
-const quick = (name: string, fn: () => Promise<void>, timeout = 120_000) =>
-  it(name, async () => {
-    if (!reachable || !QUICK_MODEL) {
-      console.warn(QUICK_MODEL
-        ? `skipping "${name}" — nothing reachable at ${BASE_URL}`
-        : `skipping "${name}" — set CV_SDK_TEST_QUICK_MODEL to a model this server serves`);
-      return;
-    }
-    await fn();
+const quick = (name: string, fn: Case, timeout = 120_000) =>
+  it(name, async (ctx) => {
+    if (!QUICK_MODEL) skip(ctx, name, "set CV_SDK_TEST_QUICK_MODEL to a model this server serves");
+    if (!reachable) skip(ctx, name, `nothing reachable at ${BASE_URL}`);
+    await fn(ctx);
   }, timeout);
 
-const live = (name: string, fn: () => Promise<void>, timeout = 120_000) =>
-  it(name, async () => {
+const live = (name: string, fn: Case, timeout = 120_000) =>
+  it(name, async (ctx) => {
     if (!reachable) {
-      console.warn(API_KEY
-        ? `skipping "${name}" — nothing reachable at ${BASE_URL}`
-        : `skipping "${name}" — CV_API_KEY is unset and the API requires a key`);
-      return;
+      skip(ctx, name, API_KEY ? `nothing reachable at ${BASE_URL}`
+                              : "CV_API_KEY is unset and the API requires a key");
     }
-    await fn();
+    await fn(ctx);
   }, timeout);
 
 describe("live server", () => {
@@ -148,12 +154,11 @@ describe("live server", () => {
     expect(blob.size).toBeGreaterThan(1000);
   }));
 
-  gpu("returns the transparency of a JPEG result as its own file", withImages("returns the transparency of a JPEG result as its own file", async () => {
-    // A JPEG cannot carry transparency, so the result is the colour and the transparency
-    // comes back beside it — on every model, so the same case runs against echo below.
+  gpu("keeps the transparency of a picture asked for as JPEG, as a PNG", withImages("keeps the transparency of a picture asked for as JPEG, as a PNG", async () => {
+    // A JPEG cannot carry transparency, so the format asked for gives way to one that can —
+    // on every model, so the same case runs against echo below.
     const job = await cv().run(image("children-alpha.png"), { scale: 2, output_format: "jpeg" });
-    expect(job.contentType).toBe("image/jpeg");
-    expect(job.alphaUrl).toBeTruthy();
+    expect(job.contentType).toBe("image/png");
   }));
 
   // The same cases, against the free model, on any server. This is the call the guide to a
@@ -171,10 +176,9 @@ describe("live server", () => {
     expect(blob.size).toBeGreaterThan(1000);
   }));
 
-  live("echo: returns the transparency of a JPEG result as its own file", withImages("echo: returns the transparency of a JPEG result as its own file", async () => {
+  live("echo: keeps the transparency of a picture asked for as JPEG, as a PNG", withImages("echo: keeps the transparency of a picture asked for as JPEG, as a PNG", async () => {
     const job = await cv().run(image("children-alpha.png"), { model: "echo", scale: 2, output_format: "jpeg" });
-    expect(job.contentType).toBe("image/jpeg");
-    expect(job.alphaUrl).toBeTruthy();
+    expect(job.contentType).toBe("image/png");
   }));
 
   live("echo: surfaces a server-side failure as JobFailed", withImages("echo: surfaces a server-side failure as JobFailed", async () => {

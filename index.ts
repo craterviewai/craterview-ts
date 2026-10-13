@@ -18,7 +18,7 @@ import { imageSize } from "image-size";
 // Mirrored from package.json, which is the number a release bumps. It cannot be imported
 // from there — this ships as TypeScript, so the import would have to resolve in the
 // consumer's toolchain — so test/version.test.ts asserts the two agree.
-export const VERSION = "0.4.17";
+export const VERSION = "0.4.18";
 const DEFAULT_BASE_URL = "https://api.craterview.ai";
 // The server rejects a longer wait outright, so asking for one costs a 422 rather than the
 // wait you asked for. `run()` clamps to this rather than letting that happen.
@@ -26,6 +26,12 @@ const MAX_SERVER_WAIT = 30;
 // The largest page the job history serves. Same reasoning: a bigger `limit` is refused, so
 // `jobs()` clamps rather than spending a request to be told no.
 const MAX_PAGE = 200;
+// The shape of each kind of id the API names in a path, exactly as it issues them. A method
+// that puts an id in its path takes one of these and nothing else, because anything else builds
+// some other request than the one the method names: `..` is a dot segment that fetch resolves
+// before sending, so `revokeKey("..")` would be `DELETE /v1/`, and encoding does not help,
+// since `%2e%2e` is resolved the same way.
+const IDS = { job: /^job_[0-9a-f]{24}$/, key: /^key_[0-9a-f]{24}$/ } as const;
 
 /**
  * A random key for safely repeating a submission.
@@ -51,7 +57,8 @@ const MAX_PAGE = 200;
  * Reusing a key with a *different* request body is rejected with 409 rather than silently
  * returning the earlier result.
  *
- * This client does not retry on your behalf. The loop above is yours to write.
+ * `submit()` does not retry on your behalf: the loop above is yours to write. `run()`, which is
+ * one whole request from upload to result, keeps a key of its own and asks once more.
  */
 export function newIdempotencyKey(): string {
   const bytes = new Uint8Array(24);
@@ -63,12 +70,78 @@ export function newIdempotencyKey(): string {
 }
 
 /**
+ * The media type a file's bytes are, from the signature at their start, or `""` for one this
+ * does not recognise. Formats the API does not take are named too, so that a refusal says
+ * what the file is rather than that it is unknown.
+ */
+export async function sniffType(blob: Blob): Promise<string> {
+  const b = new Uint8Array(await blob.slice(0, 64).arrayBuffer());
+  const at = (offset: number, text: string) =>
+    [...text].every((c, i) => b[offset + i] === c.charCodeAt(0));
+  const starts = (...bytes: number[]) => bytes.every((x, i) => b[i] === x);
+  if (starts(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)) return "image/png";
+  if (starts(0xff, 0xd8, 0xff)) return "image/jpeg";
+  if (at(0, "RIFF") && at(8, "WEBP")) return "image/webp";
+  if (starts(0x49, 0x49, 0x2a, 0x00) || starts(0x4d, 0x4d, 0x00, 0x2a)
+      || starts(0x49, 0x49, 0x2b, 0x00) || starts(0x4d, 0x4d, 0x00, 0x2b)) return "image/tiff";
+  if (starts(0xff, 0x0a) || (starts(0, 0, 0, 0x0c) && at(4, "JXL "))) return "image/jxl";
+  if (at(0, "GIF87a") || at(0, "GIF89a")) return "image/gif";
+  if (at(4, "ftyp")) {
+    // An ISO base media file names its brands: the major one, then the compatible ones to
+    // the end of the `ftyp` box. An AVIF may declare the generic `mif1` first and `avif`
+    // among the rest, so every brand is read before deciding.
+    const word = (o: number) => String.fromCharCode(...b.slice(o, o + 4));
+    const end = Math.min(new DataView(b.buffer, b.byteOffset, b.byteLength).getUint32(0), b.length);
+    const major = word(8);
+    const brands = [major];
+    for (let o = 16; o + 4 <= end; o += 4) brands.push(word(o));
+    if (brands.includes("avif") || brands.includes("avis")) return "image/avif";
+    if (["heic", "heix", "heim", "heis"].includes(major)) return "image/heic";
+    if (["mif1", "mif2", "msf1"].includes(major)) return "image/heif";
+  }
+  return "";
+}
+
+/** `value`, if it is a `kind` id as the API issues them; otherwise a {@link CraterViewError}. */
+function issued(kind: keyof typeof IDS, value: unknown, argument: string): string {
+  if (typeof value === "string" && IDS[kind].test(value)) return value;
+  throw new CraterViewError(`${argument} must be a ${kind} id as the API returned it — ${kind}_ `
+    + `and 24 hexadecimal digits — not ${JSON.stringify(value)}; nothing was sent`);
+}
+
+/** How long `run()` waits before asking a submission again: the pause the web page, the phone
+ *  app and the assistant connector take. */
+const RESUBMIT_AFTER_MS = 2_000;
+
+const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** No answer, or a failure on the platform's side or on the way to it: asked again, the request
+ *  may be answered. `fetch` rejects with a `TypeError` only when nothing came back. A refusal, a
+ *  4xx, is the same answer the next time. */
+function worthAskingAgain(e: unknown): boolean {
+  return (e as Error)?.name === "TimeoutError" || e instanceof TypeError
+    || (e instanceof CraterViewError && (e.status ?? 0) >= 500);
+}
+
+/** The API's own 503 to a submission: the one status it answers before anything is recorded,
+ *  so nothing was queued or charged. A 503 page from something on the way carries no trace id
+ *  and says nothing about the job. */
+function queuedNothing(e: unknown): boolean {
+  return e instanceof CraterViewError && e.status === 503 && e.traceId !== undefined;
+}
+
+/**
  * `status` is the HTTP status where there was one. `traceId` is the API's `X-Trace-Id` for a
  * request it answered and refused — the id to quote when asking about it. Absent when the
  * refusal came from storage rather than the API.
+ *
+ * `jobId` is the job an error is about, where there is one: a job that failed, one whose wait
+ * ran out while it carried on, or one whose result could not be fetched. Quote it when asking
+ * about the job, and collect a job still going by it.
  */
 export class CraterViewError extends Error {
-  constructor(message: string, readonly status?: number, readonly traceId?: string) {
+  constructor(message: string, readonly status?: number, readonly traceId?: string,
+              readonly jobId?: string) {
     super(message);
     this.name = "CraterViewError";
   }
@@ -108,11 +181,12 @@ export class RateLimited extends CraterViewError {
  * ours, nothing was charged, and the same call is worth making again.
  *
  * An unfamiliar code is a failure with no special handling, not an error in itself: new ones
- * appear as new things become worth telling apart.
+ * appear as new things become worth telling apart. `jobId` is the job, to quote when asking
+ * about it.
  */
 export class JobFailed extends CraterViewError {
-  constructor(message: string, readonly errorCode?: string) {
-    super(message);
+  constructor(message: string, readonly errorCode?: string, jobId?: string) {
+    super(message, undefined, undefined, jobId);
     this.name = "JobFailed";
   }
 }
@@ -134,7 +208,12 @@ export const DEFAULT_TOLERANCE_SECONDS = 300;
  * header, a timestamp too old — because from a receiver's point of view they are one
  * outcome: this is not something we sent, so it does not get to do anything.
  */
-export class InvalidSignature extends CraterViewError {}
+export class InvalidSignature extends CraterViewError {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidSignature";
+  }
+}
 
 /**
  * Check that a callback really came from CraterView, and return its parsed body.
@@ -162,6 +241,12 @@ export async function verifyWebhook(
   options: { toleranceSeconds?: number } = {},
 ): Promise<WebhookEvent> {
   const { toleranceSeconds = DEFAULT_TOLERANCE_SECONDS } = options;
+  // Before the delivery is looked at: an unset secret is this receiver's configuration, not a
+  // delivery that failed to check out, and refusing every delivery as forged would hide it.
+  if (!secret) {
+    throw new CraterViewError("verifyWebhook was given no secret: pass the one "
+      + "webhookSecret() returns, or the one on the dashboard");
+  }
 
   const signature = readHeader(headers, SIGNATURE_HEADER);
   const timestamp = readHeader(headers, TIMESTAMP_HEADER);
@@ -169,21 +254,30 @@ export async function verifyWebhook(
     throw new InvalidSignature("delivery is missing its signature headers");
   }
 
-  const sentAt = Number(timestamp);
-  if (!Number.isFinite(sentAt)) {
+  // Whole seconds in ASCII digits, as the platform writes it, and nothing else: `Number()`
+  // would also take whitespace of any script, a sign, an exponent or hex. Fifteen digits is
+  // past any time a clock will show.
+  if (!/^[0-9]{1,15}$/.test(timestamp)) {
     throw new InvalidSignature("delivery has an unreadable timestamp");
   }
+  const sentAt = Number(timestamp);
   // Both directions. A clock ahead of ours is as much a reason to distrust a delivery as one
   // behind it, and only checking the past accepts anything dated next year.
   const age = Date.now() / 1000 - sentAt;
-  if (toleranceSeconds && Math.abs(age) > toleranceSeconds) {
-    throw new InvalidSignature(`delivery is ${age.toFixed(0)}s out of date`);
+  if (toleranceSeconds && age > toleranceSeconds) {
+    throw new InvalidSignature(`delivery was signed ${age.toFixed(0)}s ago, longer ago than the `
+      + `${toleranceSeconds}s allowed: a copy replayed late, or a clock here that is wrong`);
+  }
+  if (toleranceSeconds && -age > toleranceSeconds) {
+    throw new InvalidSignature(`delivery is dated ${(-age).toFixed(0)}s ahead of this machine's `
+      + `clock, more than the ${toleranceSeconds}s allowed: check the clock here`);
   }
 
   const bytes = toBytes(body);
-  const signed = new Uint8Array(timestamp.length + 1 + bytes.length);
-  signed.set(new TextEncoder().encode(`${timestamp}.`), 0);
-  signed.set(bytes, timestamp.length + 1);
+  const prefix = new TextEncoder().encode(`${timestamp}.`);
+  const signed = new Uint8Array(prefix.length + bytes.length);
+  signed.set(prefix, 0);
+  signed.set(bytes, prefix.length);
 
   const key = await crypto.subtle.importKey(
     "raw", new TextEncoder().encode(secret),
@@ -319,6 +413,11 @@ export interface ModelInfo {
   reference_fps: number;
   params_schema: Record<string, unknown>;
   /**
+   * Every name in `params_schema`'s `properties`, in the order a form presents them. JSON does
+   * not order an object's keys, so a form drawn from the schema reads its order from here.
+   */
+  params_order: string[];
+  /**
    * JSON Schema for the fields a finished job of this model states under `result`, beside
    * any files it links. Empty for a model whose whole answer is its file.
    */
@@ -431,8 +530,9 @@ export interface JobData {
   community?: boolean;
   /**
    * Whether an automated check thought this job's images may fall outside what the
-   * service allows: the one you sent, and for some jobs the one that came back. Absent
-   * means they were not all checked.
+   * service allows: the part of your image the job worked on (all of it, unless you
+   * named a region), and for some jobs the one that came back. Absent means they were
+   * not all checked.
    */
   flagged?: boolean | null;
 }
@@ -456,8 +556,6 @@ export interface JobData {
  * worked from when it produced no file — for showing a page of jobs without downloading a
  * page of full-size pictures. `inputUrl` is the picture the model worked from, so a result
  * can be shown against what it was made from. Both expire with the job's other pictures.
- * `alphaUrl` is there only when you asked for a JPEG of a picture with transparency: the
- * transparency, as a file of its own.
  *
  * `etaSeconds` is the whole of what is reported about waiting: how long until the result,
  * counting time spent waiting for a GPU as well as time spent on one. An estimate and never
@@ -533,18 +631,6 @@ export class Job {
       ? ((given as Record<string, unknown>)["url"] as string) ?? null
       : null;
   }
-  /**
-   * The transparency of a result you asked for as JPEG, which cannot hold it: a grayscale
-   * JPEG the size of the result, white where it is opaque and black where it is transparent.
-   * The result is then the colour alone, not placed on any background, so the two together
-   * are the picture. Null for every other result.
-   */
-  get alphaUrl() {
-    const mask = (this.data.result ?? {})["alpha"];
-    return (mask && typeof mask === "object")
-      ? ((mask as Record<string, unknown>)["url"] as string) ?? null
-      : null;
-  }
   get contentType() { return (this.output["content_type"] as string) ?? null; }
   get outputBytes() { return (this.output["bytes"] as number) ?? null; }
 
@@ -566,14 +652,38 @@ export class Job {
   /** Download the result. */
   async blob(): Promise<Blob> {
     const url = this.outputUrl;
-    if (!url) {
-      throw new CraterViewError(`job ${this.id} has no result (status ${this.status})`);
-    }
+    if (!url) throw new CraterViewError(this.noFile(), undefined, undefined, this.id);
     const resp = await fetch(url, { signal: AbortSignal.timeout(TRANSFER_TIMEOUT_MS) });
+    // A link is as old as the read that brought it, and storage answers one past its expiry
+    // with 403 — so that is what a 403 almost always is, and a fresh read the fix.
+    if (resp.status === 403) {
+      throw new CraterViewError(`storage refused the result of job ${this.id} (HTTP 403): its `
+        + `link has most likely expired. Read the job again, cv.job("${this.id}"), for fresh `
+        + `links.`, 403, undefined, this.id);
+    }
     if (!resp.ok) {
-      throw new CraterViewError(`downloading result failed: ${resp.status}`, resp.status);
+      throw new CraterViewError(`storage refused the result of job ${this.id}: HTTP `
+        + `${resp.status}`, resp.status, undefined, this.id);
     }
     return await resp.blob();
+  }
+
+  /** Why there is no file to download, which depends on where the job stands. */
+  private noFile(): string {
+    if (!this.done) {
+      return `job ${this.id} has no result yet: it is still ${this.status}. Wait for it with `
+        + `waitFor() first.`;
+    }
+    if (this.status === "failed") {
+      const code = this.errorCode ? ` (${this.errorCode})` : "";
+      return `job ${this.id} failed, so it has no result: `
+        + `${this.error ?? "no reason was given"}${code}`;
+    }
+    // Succeeded, with no file. Either its model answers in `result` alone, or the file has
+    // gone; a job read after its files expire looks the same as one that never had any, so
+    // both are said rather than one guessed at.
+    return `job ${this.id} has no file to download: its model answers in \`result\` alone, `
+      + "or its file has expired or been deleted";
   }
 
   async arrayBuffer(): Promise<ArrayBuffer> {
@@ -587,8 +697,10 @@ export interface CraterViewOptions {
   /**
    * Milliseconds to wait for the API to answer a request before giving up, 60 000 by default.
    * A request that times out throws the runtime's `TimeoutError`, not a `CraterViewError`:
-   * nothing answered, so it is one to repeat with the same idempotency key. Uploads and
-   * downloads go to storage and are given five minutes whatever this says.
+   * nothing answered, so it is one to repeat with the same idempotency key — except from
+   * `run()`, which uploads afresh each time, where the message says to look in `jobs()` for
+   * the job instead. Uploads and downloads go to storage and are given five minutes whatever
+   * this says.
    */
   timeoutMs?: number;
 }
@@ -640,6 +752,26 @@ export interface SubmitOptions {
   [param: string]: unknown;
 }
 
+/**
+ * The API's `detail` as one sentence, or `undefined` where it holds no words.
+ *
+ * Usually a string. A request its validator refuses comes back as a list instead, one entry
+ * per field, which reads here as "field: what is wrong" — and without the validator's own
+ * "Value error, " in front of a sentence the API wrote for a reader.
+ */
+function spoken(detail: unknown): string | undefined {
+  if (typeof detail === "string") return detail || undefined;
+  if (!Array.isArray(detail)) return undefined;
+  const said = detail
+    .filter((e): e is { loc?: unknown[]; msg: string } => typeof e?.msg === "string" && !!e.msg)
+    .map(({ loc, msg }) => {
+      const message = msg.replace(/^Value error, /, "");
+      // A location of one part — the body as a whole — names no field worth printing.
+      return Array.isArray(loc) && loc.length > 1 ? `${loc[loc.length - 1]}: ${message}` : message;
+    });
+  return said.join("; ") || undefined;
+}
+
 export class CraterView {
   private readonly baseUrl: string;
   private readonly headers: Record<string, string>;
@@ -666,9 +798,9 @@ export class CraterView {
       body: body ? JSON.stringify(body) : undefined,
     });
 
+    const traceId = resp.headers.get("X-Trace-Id") ?? undefined;
     if (!resp.ok) {
       const detail = await this.detail(resp);
-      const traceId = resp.headers.get("X-Trace-Id") ?? undefined;
       if (resp.status === 429) {
         throw new RateLimited(detail, Number(resp.headers.get("Retry-After") ?? 0), traceId);
       }
@@ -676,16 +808,38 @@ export class CraterView {
     }
     // A 204 carries no body, so asking for JSON throws on a call that succeeded.
     if (resp.status === 204) return undefined as T;
-    return await resp.json() as T;
+    try {
+      return await resp.json() as T;
+    } catch {
+      throw new CraterViewError(this.notTheApi(resp.status), resp.status, traceId);
+    }
   }
 
+  /** The API's own words for a refusal, or a sentence saying the answer was not its. */
   private async detail(resp: Response): Promise<string> {
+    let body: unknown;
     try {
-      const body = await resp.json() as { detail?: string };
-      return body.detail ?? `HTTP ${resp.status}`;
+      body = await resp.json();
     } catch {
-      return `HTTP ${resp.status}`;
+      return this.notTheApi(resp.status);
     }
+    return spoken((body as { detail?: unknown } | null)?.detail) ?? this.notTheApi(resp.status);
+  }
+
+  /**
+   * For an answer that is not the API's JSON: an error page from something between here and
+   * the API, or a `baseUrl` that names something else. Its body is left out — a page of markup
+   * buries the one line worth reading.
+   */
+  private notTheApi(status: number): string {
+    const said = `${new URL(this.baseUrl).host} answered HTTP ${status} with something other `
+      + "than the API's JSON";
+    if (status >= 500) {
+      return `${said}: a failure on the way to the API rather than a refusal. Worth repeating — `
+        + "with the same idempotency key, for a submission, so it cannot start a second job.";
+    }
+    if (status === 429) return `${said}.`;
+    return `${said}; check that baseUrl is the API's address (${DEFAULT_BASE_URL} by default).`;
   }
 
   /**
@@ -713,12 +867,21 @@ export class CraterView {
    * key, so `submit()` can tell the API what you sent and `eta_seconds` is estimated for
    * your image rather than a typical one. A file the reader does not know is uploaded just
    * the same; only the estimate is less specific.
+   *
+   * The type sent is `contentType` when given, else the one the bytes' signature shows, else
+   * the Blob's own, else none — an undeclared upload is accepted and identified when the job
+   * runs. The bytes come before the Blob's type because that is usually read off the file's
+   * name, and a misnamed file is then refused here rather than as a job. A type the API does not take is refused by the first request, before any
+   * bytes are sent, with the list of what it does take.
    */
   async upload(image: Blob | ArrayBuffer | Uint8Array, contentType?: string): Promise<string> {
-    const blob = image instanceof Blob
-      ? image
-      : new Blob([image as BlobPart], { type: contentType ?? "image/png" });
-    const type = contentType ?? blob.type ?? "image/png";
+    const blob = image instanceof Blob ? image : new Blob([image as BlobPart]);
+    // Sent, it would come back as a refusal of `content_length`, a field the caller never
+    // wrote. Said here in their terms instead, before anything is requested.
+    if (!blob.size) {
+      throw new CraterViewError("the image given is empty (0 bytes): there is nothing to upload");
+    }
+    const type = contentType || await sniffType(blob) || blob.type || "application/octet-stream";
 
     // Declared, then signed into the URL, so it has to be the size actually sent — storage
     // refuses any other with a signature error. Taken from the Blob rather than trusted from
@@ -740,7 +903,8 @@ export class CraterView {
   }
 
   /**
-   * Queue a job. `wait` holds the response open for a settled result.
+   * Queue a job. `wait` holds the response open for a settled result, for up to that many
+   * seconds; the API holds one for at most 30, so a longer wait is asked as 30.
    *
    * Pass `idempotencyKey` — see `newIdempotencyKey` — if you intend to retry this
    * submission. Without one, a repeat after a failed or uncertain request starts a second
@@ -755,7 +919,11 @@ export class CraterView {
     const headers: Record<string, string> = idempotencyKey
       ? { "Idempotency-Key": idempotencyKey }
       : {};
-    const data = await this.request<JobData>("POST", `/v1/jobs?wait=${wait}`, {
+    // Held to the API's ceiling, so a longer wait is a long poll rather than a refusal. None at
+    // all is the API's own default, and is left unsaid.
+    const held = Math.min(wait, MAX_SERVER_WAIT);
+    const path = held > 0 ? `/v1/jobs?wait=${held}` : "/v1/jobs";
+    const data = await this.request<JobData>("POST", path, {
       model, input_key: inputKey, params,
       ...(webhookUrl ? { webhook_url: webhookUrl } : {}),
       ...(customId ? { custom_id: customId } : {}),
@@ -764,8 +932,12 @@ export class CraterView {
     return new Job(data);
   }
 
+  /**
+   * One job, by the `id` the API gave it. Anything that is not a job id throws a
+   * `CraterViewError` without a request being made.
+   */
   async job(id: string): Promise<Job> {
-    return new Job(await this.request<JobData>("GET", `/v1/jobs/${id}`));
+    return new Job(await this.request<JobData>("GET", `/v1/jobs/${issued("job", id, "id")}`));
   }
 
   /**
@@ -879,33 +1051,107 @@ export class CraterView {
    * You cannot revoke the key this client is authenticating with: it is refused with status
    * 409, because it would leave you unable to make another. Create a replacement, move onto
    * it, then revoke this one.
+   *
+   * `keyId` is a key's `id` from `keys()` or `createKey()`, never its value or its prefix.
+   * Anything else throws a `CraterViewError` without a request being made.
    */
   async revokeKey(keyId: string): Promise<void> {
-    await this.request("DELETE", `/v1/keys/${encodeURIComponent(keyId)}`);
+    await this.request("DELETE", `/v1/keys/${issued("key", keyId, "keyId")}`);
   }
 
+  /**
+   * Wait until a job settles. Prefer `wait` on submit for short jobs.
+   *
+   * Past `timeoutMs` this throws a `CraterViewError` with the job's `jobId`. Only the wait has
+   * ended: the job carries on, and is collected by calling this again with that id.
+   *
+   * A read that gets no answer, a failure on the way to the API or a request to slow down is
+   * not the job's, and the wait goes on through it until `timeoutMs`. A refusal it throws
+   * carries the `jobId` too, so no failure here loses the job.
+   */
   async waitFor(job: Job | string, timeoutMs = 600_000, pollMs = 1000): Promise<Job> {
-    const id = typeof job === "string" ? job : job.id;
+    const id = issued("job", typeof job === "string" ? job : job.id, "job");
+    let current = typeof job === "string" ? undefined : job;
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      const current = await this.job(id);
+      try {
+        current = await this.job(id);
+      } catch (e) {
+        if (e instanceof RateLimited || worthAskingAgain(e)) {
+          await pause(Math.max(pollMs, ((e as RateLimited).retryAfter ?? 0) * 1000));
+          continue;
+        }
+        if (e instanceof CraterViewError && !e.jobId) {
+          throw new CraterViewError(e.message, e.status, e.traceId, id);
+        }
+        throw e;
+      }
       if (current.done) return current;
-      await new Promise((r) => setTimeout(r, pollMs));
+      await pause(pollMs);
     }
-    throw new CraterViewError(`job ${id} did not finish within ${timeoutMs}ms`);
+    const where = current ? `still ${current.status}` : "not finished";
+    throw new CraterViewError(`job ${id} is ${where} after ${timeoutMs / 1000}s of waiting. It `
+      + "has not failed: it carries on, and is charged only if it succeeds. Collect it with "
+      + `waitFor("${id}") or job("${id}"); submitting the request again starts a second job, `
+      + "charged as well.", undefined, undefined, id);
   }
 
   /**
    * Upload, submit and wait, in one call — the common case. Uses server-side waiting
-   * first so a fast job costs a single round trip, then polls for anything slower.
+   * first so a fast job costs a single round trip, then polls for anything slower. The
+   * server is asked to hold the submission for at most half this client's own `timeoutMs`,
+   * so its answer arrives before the client stops listening for it.
+   *
+   * Past `timeoutMs` the job is not given up on, only waited for: the error carries its
+   * `jobId`, to collect it by with `waitFor`.
+   *
+   * **One submission, asked at most twice.** A submission that got no answer, or met a failure
+   * on the platform's side, may have made the job before it failed, so it is asked once more
+   * under one idempotency key, and the API answers with the job the first attempt made if it
+   * made one — never a second. Pass `idempotencyKey` to choose the key. Refused both times by
+   * the API's own 503, which it answers before anything is recorded, the error says so in its
+   * words.
    */
   async run(image: Blob | ArrayBuffer | Uint8Array,
                 options: SubmitOptions & { timeoutMs?: number } = {}): Promise<Job> {
-    const { timeoutMs = 600_000, wait = MAX_SERVER_WAIT, ...rest } = options;
+    const { timeoutMs = 600_000, wait = MAX_SERVER_WAIT, idempotencyKey = newIdempotencyKey(),
+            ...rest } = options;
     const inputKey = await this.upload(image);
-    let job = await this.submit(inputKey, { ...rest, wait: Math.min(wait, MAX_SERVER_WAIT) });
+    const submitted = () => this.submit(inputKey, {
+      ...rest, idempotencyKey, wait: Math.min(wait, this.timeoutMs / 2000) });
+    let job: Job;
+    let first: unknown;
+    try {
+      try {
+        job = await submitted();
+      } catch (e) {
+        if (!worthAskingAgain(e)) throw e;
+        first = e;
+        await pause(RESUBMIT_AFTER_MS);
+        job = await submitted();
+      }
+    } catch (e) {
+      if (!worthAskingAgain(e)) throw e;
+      if (queuedNothing(first) && queuedNothing(e)) {
+        const refused = e as CraterViewError;
+        throw new CraterViewError(
+          `the submission was asked twice, and both times CraterView said why: ${refused.message}`,
+          refused.status, refused.traceId);
+      }
+      // Thrown as the kind it was, so a caller telling no answer from a refusal by type sees
+      // what it saw before. Only the advice changes: run() uploads afresh each time.
+      const said = `the submission was asked twice and answered neither time `
+        + `(${(e as Error).message}), so a job may have been made; if it was, it runs and is `
+        + "charged only if it succeeds. Look for it with jobs(), newest first, before running "
+        + "this again: run() uploads afresh, so repeating it starts a second job.";
+      if (e instanceof CraterViewError) throw new CraterViewError(said, e.status, e.traceId);
+      if ((e as Error).name === "TimeoutError") throw new DOMException(said, "TimeoutError");
+      throw new TypeError(said);
+    }
     if (!job.done) job = await this.waitFor(job, timeoutMs);
-    if (!job.succeeded) throw new JobFailed(job.error ?? "job failed", job.errorCode ?? undefined);
+    if (!job.succeeded) {
+      throw new JobFailed(job.error ?? "job failed", job.errorCode ?? undefined, job.id);
+    }
     return job;
   }
 }

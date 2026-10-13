@@ -10,8 +10,8 @@
 
 import { describe, expect, it } from "vitest";
 import {
-  DEFAULT_TOLERANCE_SECONDS, InvalidSignature, SIGNATURE_HEADER, TIMESTAMP_HEADER,
-  verifyWebhook,
+  CraterViewError, DEFAULT_TOLERANCE_SECONDS, InvalidSignature, SIGNATURE_HEADER,
+  TIMESTAMP_HEADER, verifyWebhook,
 } from "../index";
 
 const SECRET = "cvwh_test-secret";
@@ -64,6 +64,25 @@ describe("verifyWebhook", () => {
   it("rejects a delivery with no signature headers", async () => {
     await expect(verifyWebhook("{}", {}, SECRET))
       .rejects.toBeInstanceOf(InvalidSignature);
+  });
+
+  it("refuses a timestamp that is not plain digits, before it reaches the arithmetic", async () => {
+    // The platform writes whole seconds as ASCII digits. Anything else is refused as
+    // unreadable, even signed correctly over itself, with a body or without one: `Number()`
+    // takes whitespace of any script, a sign, an exponent and hex, and a character outside
+    // ASCII is more than one byte of the signed material.
+    const t = now();
+    const arabic = [...t].map((d) => String.fromCharCode(0x660 + Number(d))).join("");
+    const stamps = [` ${t}`, `\u2003${t}`, `${t} `, `+${t}`, `${t}.0`, `${t}e0`,
+      `0x${Number(t).toString(16)}`, arabic, "9".repeat(400)];
+    for (const stamp of stamps) {
+      for (const body of ['{"id":"job_1"}', ""]) {
+        const signed = await delivery(body, SECRET, stamp);
+        const failure = await verifyWebhook(signed.body, signed.headers, SECRET).catch((e) => e);
+        expect(failure, JSON.stringify(stamp)).toBeInstanceOf(InvalidSignature);
+        expect(failure.message, JSON.stringify(stamp)).toMatch(/unreadable timestamp/);
+      }
+    }
   });
 
   it("rejects a stale delivery, so a captured one cannot be replayed later", async () => {
@@ -133,5 +152,38 @@ describe("verifyWebhook", () => {
     const { body, headers } = await delivery("not json at all");
     await expect(verifyWebhook(body, headers, SECRET))
       .rejects.toBeInstanceOf(InvalidSignature);
+  });
+
+  it("says a missing secret is missing, rather than failing inside the crypto", async () => {
+    // An unset environment variable reached the key import as an empty key and came back as
+    // the runtime's own error, naming neither the secret nor where to get one.
+    const { body, headers } = await delivery('{"id":"job_1"}');
+    for (const secret of [undefined as unknown as string, ""]) {
+      const failure = await verifyWebhook(body, headers, secret).catch((e) => e);
+      expect(failure).toBeInstanceOf(CraterViewError);
+      expect(failure.message).toMatch(/no secret/);
+      expect(failure.message).toMatch(/webhookSecret\(\)/);
+    }
+  });
+
+  it("says a delivery from ahead of this clock is ahead, not negatively out of date", async () => {
+    const ahead = String(Math.floor(Date.now() / 1000) + DEFAULT_TOLERANCE_SECONDS + 112);
+    const { body, headers } = await delivery('{"id":"job_1"}', SECRET, ahead);
+    const failure = await verifyWebhook(body, headers, SECRET).catch((e) => e);
+    expect(failure).toBeInstanceOf(InvalidSignature);
+    expect(failure.message).toMatch(/ahead/);
+    expect(failure.message).toMatch(/clock/);
+    expect(failure.message).not.toMatch(/-/);
+  });
+
+  it("says how late a late delivery is", async () => {
+    const old = String(Math.floor(Date.now() / 1000) - DEFAULT_TOLERANCE_SECONDS - 100);
+    const { body, headers } = await delivery('{"id":"job_1"}', SECRET, old);
+    await expect(verifyWebhook(body, headers, SECRET)).rejects.toThrow(/signed 40\ds ago/);
+  });
+
+  it("names its refusal InvalidSignature", async () => {
+    const failure = await verifyWebhook("{}", {}, SECRET).catch((e) => e);
+    expect(failure.name).toBe("InvalidSignature");
   });
 });

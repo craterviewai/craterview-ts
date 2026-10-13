@@ -41,7 +41,6 @@ describe.skipIf(!shared)("what a client reads out of a job", () => {
       // The one this file exists for: read out of `result.input`, and the picture the model
       // worked from rather than the file you sent.
       expect(Boolean(job.inputUrl)).toBe(want.has_input_url);
-      expect(Boolean(job.alphaUrl)).toBe(want.has_alpha_url);
       expect(Boolean(job.thumbnailUrl)).toBe(want.has_thumbnail_url);
       expect(job.contentType).toBe(want.output_content_type ?? null);
       expect(job.outputBytes).toBe(want.output_bytes ?? null);

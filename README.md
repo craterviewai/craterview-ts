@@ -86,6 +86,10 @@ const job = await cv.run(image, {          // Blob | ArrayBuffer | Uint8Array
 It waits server-side first, so a job that finishes quickly costs a single round trip, then
 falls back to polling for anything slower. A job that fails throws `JobFailed`.
 
+Past `timeoutMs` only the waiting stops. The job carries on and is charged only if it
+succeeds; the `CraterViewError` thrown carries its `.jobId`, and `cv.waitFor(error.jobId)`
+collects it. Calling `run()` again would start, and bill, a second job.
+
 Which parameters a model accepts is published by the API rather than hard-coded here — see
 `cv.models()`.
 
@@ -105,9 +109,12 @@ a presigned URL and `blob()` GETs the result the same way; the API moves keys, n
 
 ## Retries are yours to write
 
-**This client does not retry.** That is deliberate: only the caller knows where one logical
-request ends and the next begins, and a retry the client invented would be a second job you
-are billed for.
+**Outside `run()` and `waitFor()`, this client does not retry.** `run()` asks its submission
+once more, under one idempotency key, when the first got no answer or a failure on the
+platform's side, and `waitFor()` reads on through the same until its timeout; neither can make a
+second job. Every other call is sent once. That is deliberate: only the caller knows where one
+logical request ends and the next begins, and a retry the client invented would be a second
+job you are billed for.
 
 What it gives you instead is a key generator. Make one key per *logical request* and reuse
 it for every attempt at that request:
@@ -139,15 +146,16 @@ the same job.
 Every answer the API or storage gives that is not a success is thrown as a
 `CraterViewError`. `.status` carries the HTTP status where there was one, and `.traceId` the
 API's `X-Trace-Id` for a request it answered and refused — the id to quote when you ask us
-about it. A request that got
+about it. `.jobId` names the job an error is about, where there is one. A request that got
 no answer at all throws the runtime's own error from `fetch`, which is how the retry loop
 above tells the two apart.
 
 | Class | Meaning |
 |---|---|
 | `RateLimited` | 429 — one of five limits, and the message says which: the key's request rate, the account's upload URLs a minute, the account's new keys an hour, the account's jobs in flight, or a full queue. `.retryAfter` is seconds to wait: until the window rolls over for the two per-minute limits, until a new key can be made for the hourly one, or an interval to poll on for the other two. |
-| `JobFailed` | The job ran and did not succeed. `.message` says what you can do about it; `.errorCode` is the half to branch on. |
-| `CraterViewError` | Everything else, including 4xx and 5xx from the API. |
+| `JobFailed` | The job ran and did not succeed. `.message` says what you can do about it; `.errorCode` is the half to branch on; `.jobId` is the job. |
+| `InvalidSignature` | A webhook delivery did not verify. Do not act on its body. |
+| `CraterViewError` | Everything else, including 4xx and 5xx from the API, and storage refusing an upload or a download. |
 
 These subclass `Error` under an ES2020 target so `instanceof` works. Compiling this package
 down to ES5 silently breaks that, and `catch (e) { if (e instanceof RateLimited) }` — the
@@ -170,7 +178,6 @@ Every field the API publishes on a job is exposed here.
 | `outputUrl`, `downloadUrl` | The result, presigned. One to display, one to save |
 | `thumbnailUrl` | A small JPEG of the job's picture, for listings — the result, or what the model worked from when it produced no file. Null when none was drawn |
 | `inputUrl` | The picture the model worked from — the region, where you named one |
-| `alphaUrl` | Only for a JPEG result of a picture with transparency, which JPEG cannot hold: the transparency as a grayscale JPEG, white where opaque. The result is then the colour alone |
 | `contentType` | The result's media type |
 | `outputBytes` | The result's size in bytes |
 | `blob()`, `arrayBuffer()` | Download the result |
@@ -309,8 +316,9 @@ new CraterView({
 
 `baseUrl` is what you change to point at a local server. `timeoutMs` is how long to wait for
 the API to answer before giving up with the runtime's `TimeoutError` — nothing answered, so
-it is a request to repeat with the same idempotency key. Uploads and downloads go to storage
-and have five minutes.
+it is a request to repeat with the same idempotency key. `run()` uploads afresh each time, so
+from it look for the job in `cv.jobs()` instead of running it again. Uploads and downloads go
+to storage and have five minutes.
 
 ## From Claude Code
 

@@ -18,7 +18,7 @@ import { imageSize } from "image-size";
 // Mirrored from package.json, which is the number a release bumps. It cannot be imported
 // from there — this ships as TypeScript, so the import would have to resolve in the
 // consumer's toolchain — so test/version.test.ts asserts the two agree.
-export const VERSION = "0.4.19";
+export const VERSION = "0.4.20";
 const DEFAULT_BASE_URL = "https://api.craterview.ai";
 // The server rejects a longer wait outright, so asking for one costs a 422 rather than the
 // wait you asked for. `run()` clamps to this rather than letting that happen.
@@ -406,6 +406,12 @@ export interface ModelInfo {
    * help with it, where a smaller region does. Zero means this axis is unbounded for you.
    */
   max_input_megapixels: number;
+  /**
+   * The most of a picture this model works on in one job with `denoise` sent as true, in
+   * megapixels; `max_input_megapixels` applies otherwise. Null for a model that takes no
+   * `denoise`. Zero means this axis is unbounded for you.
+   */
+  max_denoise_input_megapixels?: number | null;
   /** Whole credits. The price is flat and knowable before you send anything. */
   credits_per_image: number;
   /** Whole credits. Null means this model takes stills only. */
@@ -481,6 +487,16 @@ export interface GalleryState {
   post_id: string;
 }
 
+/** How far a running job has got. */
+export interface JobProgress {
+  /** `starting` while your file is fetched and read, `processing` while the model runs,
+   * `saving` while the result is stored. */
+  stage: "starting" | "processing" | "saving";
+  /** Roughly how much of the run is done, from 0 up to but never reaching 1, estimated from
+   * how long recent jobs like this one have taken. Null when no estimate holds. */
+  fraction: number | null;
+}
+
 /** The API's job representation, exactly as it arrives. Snake case is the wire's. */
 export interface JobData {
   id: string;
@@ -519,6 +535,8 @@ export interface JobData {
   /** Whole credits. TypeScript cannot say integer, but the API only ever sends one. */
   credits?: number | null;
   eta_seconds?: number | null;
+  /** How far the job has got while it runs. Absent while queued and once settled. */
+  progress?: JobProgress | null;
   /** Retained past the ordinary expiry because its owner asked, links and all. */
   kept?: boolean;
   /**
@@ -561,6 +579,10 @@ export interface JobData {
  * counting time spent waiting for a GPU as well as time spent on one. An estimate and never
  * a promise — read it as guidance, not a deadline. Absent once a job has settled.
  *
+ * `progress` is how far a running job has got: its stage, and roughly what fraction of the
+ * run is done — an estimate that never reaches 1 before the job finishes, and null when none
+ * holds. Null while the job is queued and once it has settled.
+ *
  * `community` says the job is on the community queue, which runs on shared, free capacity —
  * so it waits longer at busy times, and never stops. That is where an account's work goes
  * when it is not paying, by holding credit or by subscribing. An empty balance is never itself
@@ -580,6 +602,7 @@ export class Job {
   get errorCode() { return this.data.error_code ?? null; }
   get credits() { return this.data.credits ?? null; }
   get etaSeconds() { return this.data.eta_seconds ?? null; }
+  get progress() { return this.data.progress ?? null; }
   /** Your own name for this job, or null if you did not send one. */
   get customId() { return this.data.custom_id ?? null; }
   // Defaulted rather than nulled: a server too old to send the field is not running a

@@ -18,7 +18,7 @@ import { imageSize } from "image-size";
 // Mirrored from package.json, which is the number a release bumps. It cannot be imported
 // from there — this ships as TypeScript, so the import would have to resolve in the
 // consumer's toolchain — so test/version.test.ts asserts the two agree.
-export const VERSION = "0.4.23";
+export const VERSION = "0.4.24";
 const DEFAULT_BASE_URL = "https://api.craterview.ai";
 // The server rejects a longer wait outright, so asking for one costs a 422 rather than the
 // wait you asked for. `run()` clamps to this rather than letting that happen.
@@ -131,7 +131,9 @@ function queuedNothing(e: unknown): boolean {
 }
 
 /**
- * `status` is the HTTP status where there was one. `traceId` is the API's `X-Trace-Id` for a
+ * `status` is the HTTP status where there was one, and `code` the API's stable name for a
+ * refusal: branch on `code`, not on the message, and handle one you do not know by its status.
+ * `traceId` is the API's `X-Trace-Id` for a
  * request it answered and refused — the id to quote when asking about it. Absent when the
  * refusal came from storage rather than the API.
  *
@@ -141,15 +143,16 @@ function queuedNothing(e: unknown): boolean {
  */
 export class CraterViewError extends Error {
   constructor(message: string, readonly status?: number, readonly traceId?: string,
-              readonly jobId?: string) {
+              readonly jobId?: string, readonly code?: string) {
     super(message);
     this.name = "CraterViewError";
   }
 }
 
 /**
- * 429 — too fast, or too much at once. Five different limits answer with this, and the
- * message says which:
+ * 429 — too fast, or too much at once. Five different limits answer with this, and `code`
+ * says which — `rate_limited`, `too_many_keys`, `too_many_uploads`, `too_many_jobs` or
+ * `queue_full`, in this order:
  *
  * - the key's request rate, per minute;
  * - the account's new keys, per hour — counted across all its keys, and only from
@@ -167,8 +170,8 @@ export class CraterViewError extends Error {
  * on, since nothing here predicts when a slot frees.
  */
 export class RateLimited extends CraterViewError {
-  constructor(message: string, readonly retryAfter?: number, traceId?: string) {
-    super(message, 429, traceId);
+  constructor(message: string, readonly retryAfter?: number, traceId?: string, code?: string) {
+    super(message, 429, traceId, undefined, code);
     this.name = "RateLimited";
   }
 }
@@ -412,6 +415,19 @@ export interface ModelInfo {
    * `denoise`. Zero means this axis is unbounded for you.
    */
   max_denoise_input_megapixels?: number | null;
+  /**
+   * The most of a picture this model works on in one job with `tiled` sent as true, in
+   * megapixels: the region you name with `roi`, or the whole image, worked on at its own
+   * resolution and returned at its own size. Without `tiled`, a larger picture is reduced
+   * rather than refused: see `working_megapixels`. Null for a model that takes no `tiled`.
+   */
+  max_tiled_input_megapixels?: number | null;
+  /**
+   * The most this model works on at a picture's own resolution, in megapixels: a larger
+   * picture or region is reduced to about this area first and comes back at about this size,
+   * unless `tiled` is sent as true. Null for a model that works at the size it is given.
+   */
+  working_megapixels?: number | null;
   /** Whole credits. The price is flat and knowable before you send anything. */
   credits_per_image: number;
   /** Whole credits. Null means this model takes stills only. */
@@ -559,6 +575,8 @@ export interface JobData {
  * A submitted job. Mirrors the API's job representation field for field.
  *
  * `credits` is what you were billed, and it is the only figure about cost the API states.
+ * What your balance does not cover is never collected: it is written off when credit next
+ * arrives or a subscription renews.
  * For how long a job took, `finishedAt` minus `createdAt` is the wait you actually had,
  * queue included — both are here and both are on the webhook, which states the same fields
  * by the same names.
@@ -585,9 +603,10 @@ export interface JobData {
  *
  * `community` says the job is on the community queue, which runs on shared, free capacity —
  * so it waits longer at busy times, and never stops. That is where an account's work goes
- * when it is not paying, by holding credit or by subscribing. An empty balance is never itself
- * a reason to refuse a job — paying moves work onto paid compute that scales with demand, not
- * the right to submit — but on some models the community queue takes smaller files.
+ * when it is not paying: no credit, and no subscription with work left this period. An empty
+ * balance is never itself a reason to refuse a job — paying moves work onto paid compute that
+ * scales with demand, not the right to submit — but on some models the community queue takes
+ * smaller files.
  * `models()` lists each model's limits for your key, and a file over them is refused with
  * the limit named.
  */
@@ -642,8 +661,9 @@ export class Job {
   /**
    * A link to the picture the model worked from. Where you named a region, this is that
    * region — so what was used is something you can look at rather than something to take on
-   * trust. It is not the file you uploaded: yours stays yours and is removed on its own
-   * schedule.
+   * trust. It is not the file you uploaded but a new one written from it, not copied — so do
+   * not expect a hash of it to match your file's, and a JPEG or WebP is compressed again.
+   * Yours is removed on its own schedule.
    *
    * Null for a job that has not finished. A model that answers about a picture rather than
    * producing one has it too: it is the picture that answer is about.
@@ -823,11 +843,12 @@ export class CraterView {
 
     const traceId = resp.headers.get("X-Trace-Id") ?? undefined;
     if (!resp.ok) {
-      const detail = await this.detail(resp);
+      const { detail, code } = await this.refusal(resp);
       if (resp.status === 429) {
-        throw new RateLimited(detail, Number(resp.headers.get("Retry-After") ?? 0), traceId);
+        throw new RateLimited(detail, Number(resp.headers.get("Retry-After") ?? 0), traceId,
+                              code);
       }
-      throw new CraterViewError(detail, resp.status, traceId);
+      throw new CraterViewError(detail, resp.status, traceId, undefined, code);
     }
     // A 204 carries no body, so asking for JSON throws on a call that succeeded.
     if (resp.status === 204) return undefined as T;
@@ -838,15 +859,18 @@ export class CraterView {
     }
   }
 
-  /** The API's own words for a refusal, or a sentence saying the answer was not its. */
-  private async detail(resp: Response): Promise<string> {
+  /** The API's own words for a refusal and its code, or a sentence saying the answer was not
+   *  its. One read of the body, which can be read once. */
+  private async refusal(resp: Response): Promise<{ detail: string; code?: string }> {
     let body: unknown;
     try {
       body = await resp.json();
     } catch {
-      return this.notTheApi(resp.status);
+      return { detail: this.notTheApi(resp.status) };
     }
-    return spoken((body as { detail?: unknown } | null)?.detail) ?? this.notTheApi(resp.status);
+    const said = body as { detail?: unknown; code?: unknown } | null;
+    return { detail: spoken(said?.detail) ?? this.notTheApi(resp.status),
+             code: typeof said?.code === "string" ? said.code : undefined };
   }
 
   /**
@@ -973,13 +997,12 @@ export class CraterView {
    * until the history runs out. 200 is the largest page the API serves, and a bigger number
    * is fetched as 200 rather than sent and refused.
    */
-  async *jobs(options: { limit?: number; status?: JobStatus } = {}): AsyncGenerator<Job> {
+  async *jobs(options: { limit?: number } = {}): AsyncGenerator<Job> {
     let before: string | undefined;
     for (;;) {
       const params = new URLSearchParams({
         limit: String(Math.min(options.limit ?? 50, MAX_PAGE)),
       });
-      if (options.status) params.set("status", options.status);
       if (before) params.set("before", before);
 
       const page = await this.request<{ data: JobData[]; has_more: boolean; next_before?: string }>(
@@ -1000,7 +1023,9 @@ export class CraterView {
    * charged when it succeeds, so queued and running work is not in the figures yet, and a
    * failed job costs nothing.
    *
-   * `credits_remaining` is always a number, floored at zero. `jobs_in_flight` and
+   * `credits_remaining` is always a number, floored at zero. A balance of zero never stops a
+   * submission: `community` says whether your next job runs on the community queue, which is
+   * free and can wait longer at busy times, or on paid compute. `jobs_in_flight` and
    * `max_jobs_in_flight` are the state of the queue and are what a 429 on submit is about.
    *
    * Account-wide, so every key on an account reports the same figures.
@@ -1010,7 +1035,8 @@ export class CraterView {
   }
 
   /**
-   * The secret your callbacks are signed with, created the first time you ask.
+   * The secret your callbacks are signed with, created the first time you ask or with your
+   * first delivery, whichever comes first.
    *
    * Pass it to {@link verifyWebhook}. Unlike an API key this can be read back whenever you
    * need it — but treat it as a credential all the same: anyone holding it can produce a

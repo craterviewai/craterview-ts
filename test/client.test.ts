@@ -228,6 +228,18 @@ describe("error mapping", () => {
     await expect(job.blob()).rejects.toMatchObject({ name: "CraterViewError", status: 403 });
   });
 
+  it("carries the code a program branches on", async () => {
+    stubFetch([
+      { status: 404, body: { detail: "no model", code: "model_not_found" } },
+      { status: 429, body: { detail: "full", code: "queue_full" }, headers: { "Retry-After": "5" } },
+      { status: 502, body: "<html>bad gateway</html>" },
+    ]);
+    const cv = new CraterView({ apiKey: "k", baseUrl: "http://gateway.test" });
+    await expect(cv.job(JOB_ID)).rejects.toMatchObject({ status: 404, code: "model_not_found" });
+    await expect(cv.models()).rejects.toMatchObject({ name: "RateLimited", code: "queue_full" });
+    await expect(cv.models()).rejects.toMatchObject({ status: 502, code: undefined });
+  });
+
   it("carries the trace id the first-call guide says to quote", async () => {
     // The guide tells a reader to quote `X-Trace-Id` for a request the API refused. A caller of
     // this client never sees a header, so the error has to carry it.
@@ -329,12 +341,6 @@ describe("pagination", () => {
     const ids: string[] = [];
     for await (const job of client("k").jobs()) ids.push(job.id);
     expect(ids).toEqual([]);
-  });
-
-  it("passes the status filter through", async () => {
-    const calls = stubFetch([{ body: { data: [], has_more: false } }]);
-    for await (const _ of client("k").jobs({ status: "failed" })) { /* drain */ }
-    expect(calls[0]!.url).toContain("status=failed");
   });
 });
 

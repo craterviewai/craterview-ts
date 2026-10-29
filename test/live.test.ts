@@ -128,12 +128,12 @@ const live = (name: string, fn: Case, timeout = 120_000) =>
 
 describe("live server", () => {
   live("lists models with parameter schemas", async () => {
-    const models = await cv().models() as Array<{ name: string; params_schema: unknown }>;
+    const models = await cv().models() as Array<{ id: string; params_schema: unknown }>;
     // Asserts the shape of the catalog rather than its contents: which models are listed
     // is the service's to change, and a test naming one fails the day it is withdrawn.
     expect(models.length).toBeGreaterThan(0);
     for (const model of models) {
-      expect(model.name).toBeTruthy();
+      expect(model.id).toBeTruthy();
       expect(model.params_schema).toBeTruthy();
     }
   });

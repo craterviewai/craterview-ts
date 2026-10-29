@@ -18,7 +18,7 @@ import { imageSize } from "image-size";
 // Mirrored from package.json, which is the number a release bumps. It cannot be imported
 // from there — this ships as TypeScript, so the import would have to resolve in the
 // consumer's toolchain — so test/version.test.ts asserts the two agree.
-export const VERSION = "0.4.26";
+export const VERSION = "0.4.27";
 const DEFAULT_BASE_URL = "https://api.craterview.ai";
 // The server rejects a longer wait outright, so asking for one costs a 422 rather than the
 // wait you asked for. `run()` clamps to this rather than letting that happen.
@@ -336,11 +336,19 @@ function timingSafeEqual(a: string, b: string): boolean {
  * with `JobData` — there is no wrapper class here because there is no behavior to add.
  */
 export interface ModelInfo {
-  /** The public name, and what you pass as `model` when submitting. */
-  name: string;
-  version: string;
+  /** What you pass as `model` when submitting. Not for showing to a person; that is `title`. */
+  id: string;
+  /**
+   * Which revision of this model is in service. It changes when the same input gives a
+   * different result, while the id stays the same; record it to explain an old result later.
+   */
+  revision: string;
+  /** What to call this model when talking to a person. */
   title: string;
+  /** What this model is for and when to choose it over another; for a program or an agent. */
   description: string;
+  /** What this model does, in one short line for a person choosing it in an app. */
+  help: string;
   accepts: string[];
   /**
    * The media type a result usually comes back as, and advisory: a model that keeps the
@@ -365,6 +373,12 @@ export interface ModelInfo {
    * utility or fun experiment.
    */
   tenure?: "fixed" | "comet";
+  /**
+   * Whether this is a model for testing an integration rather than for use: free, and it
+   * returns a result of the right size without improving the picture. `echo` is one.
+   * CraterView's apps do not offer it; an app built on this catalog should leave it out too.
+   */
+  test_model?: boolean;
   max_input_bytes: number;
   /**
    * The ceilings **your key** is held to, not the model's widest. Community work is bounded
@@ -372,16 +386,16 @@ export interface ModelInfo {
    * before uploading rather than learning them from a rejected job.
    *
    * `max_frame_megapixels` bounds one frame you send, and applies to images too since a
-   * still is one frame. `max_frames` bounds how many frames one job may carry. Zero means
-   * that axis is unbounded for you.
+   * still is one frame. `max_frames` bounds how many frames one job may carry. Null means
+   * nothing bounds that axis for you; a limit is never 0.
    *
    * For a duration, divide: `max_frames / reference_fps` is the longest clip you may send, in
    * seconds. It is not published as its own field on purpose — one limit with two spellings
    * is one that can disagree with itself, and frames are what the platform counts, enforces
    * and bills on.
    */
-  max_frame_megapixels: number;
-  max_frames: number;
+  max_frame_megapixels: number | null;
+  max_frames: number | null;
   /**
    * The largest frame you may get **back**, in megapixels, and for a model that enlarges it
    * is the ceiling that decides whether a job runs: what returns is the frame you send
@@ -392,42 +406,36 @@ export interface ModelInfo {
    *
    * ```ts
    * const result = megapixels * scale ** 2;
-   * if (model.max_output_megapixels && result > model.max_output_megapixels) {
+   * if (model.max_output_megapixels !== null && result > model.max_output_megapixels) {
    *   // send a smaller region of the image, or ask for less enlargement
    * }
    * ```
    *
    * Sending a smaller region keeps every pixel of what it covers; asking for less
-   * enlargement keeps the whole picture. Zero means this axis is unbounded for you.
+   * enlargement keeps the whole picture. Null means nothing bounds it for you.
    */
-  max_output_megapixels: number;
+  max_output_megapixels: number | null;
   /**
-   * The most of a picture this model works on in one job, in megapixels: the region you
+   * The most of a picture one job may work on for you, in megapixels: the region you
    * name with `roi`, or the whole image. Where it is set it binds at every enlargement, so
    * the largest frame you may send is the smaller of this and `max_output_megapixels`
    * divided by the square of the enlargement — and asking for less enlargement does not
-   * help with it, where a smaller region does. Zero means this axis is unbounded for you.
+   * help with it, where a smaller region does. Null means nothing bounds it for you.
    */
-  max_input_megapixels: number;
+  max_input_megapixels: number | null;
   /**
-   * The most of a picture this model works on in one job with `denoise` sent as true, in
-   * megapixels; `max_input_megapixels` applies otherwise. Null for a model that takes no
-   * `denoise`. Zero means this axis is unbounded for you.
+   * The most of a picture one job may work on for you at each `binning` value, in megapixels,
+   * keyed by the value ("2x2", "3x3", ...); `max_input_megapixels` applies with binning off.
+   * Each is `max_output_megapixels` divided by the square of the largest scale that binning
+   * allows. Null for a model that takes no `binning`, or when nothing bounds it for you.
    */
-  max_denoise_input_megapixels?: number | null;
+  max_input_megapixels_by_binning?: Record<string, number> | null;
   /**
-   * The most of a picture this model works on in one job with `tiled` sent as true, in
-   * megapixels: the region you name with `roi`, or the whole image, worked on at its own
-   * resolution and returned at its own size. Without `tiled`, a larger picture is reduced
-   * rather than refused: see `working_megapixels`. Null for a model that takes no `tiled`.
+   * The shortest side, in pixels, of the part of a picture this model works on: the region
+   * you name with `roi`, or the whole image. A job with a shorter one fails before the model
+   * runs, as `input_too_small`, and is not charged. The same for every key.
    */
-  max_tiled_input_megapixels?: number | null;
-  /**
-   * The most this model works on at a picture's own resolution, in megapixels: a larger
-   * picture or region is reduced to about this area first and comes back at about this size,
-   * unless `tiled` is sent as true. Null for a model that works at the size it is given.
-   */
-  working_megapixels?: number | null;
+  min_input_side: number;
   /** Whole credits. The price is flat and knowable before you send anything. */
   credits_per_image: number;
   /** Whole credits. Null means this model takes stills only. */
@@ -439,6 +447,12 @@ export interface ModelInfo {
    * not order an object's keys, so a form drawn from the schema reads its order from here.
    */
   params_order: string[];
+  /**
+   * A short line for a person choosing each setting in a form, keyed by parameter name: every
+   * parameter in `params_schema` that one control can set. Show it under the control. For what
+   * a value may be and what may be sent together, read `params_schema`.
+   */
+  params_help: Record<string, string>;
   /**
    * JSON Schema for the fields a finished job of this model states under `result`, beside
    * any files it links. Empty for a model whose whole answer is its file.
@@ -1023,7 +1037,9 @@ export class CraterView {
    * charged when it succeeds, so queued and running work is not in the figures yet, and a
    * failed job costs nothing.
    *
-   * `credits_remaining` is always a number, floored at zero. A balance of zero never stops a
+   * The balance is `credits_remaining`; `credits_spent` is what the account has spent, all
+   * time, and `credits_granted` what it has been given. `credits_remaining` is always a
+   * number, floored at zero. A balance of zero never stops a
    * submission: `community` says whether your next job runs on the community queue, which is
    * free and can wait longer at busy times, or on paid compute. `jobs_in_flight` and
    * `max_jobs_in_flight` are the state of the queue and are what a 429 on submit is about.

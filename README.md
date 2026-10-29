@@ -1,6 +1,6 @@
 # craterview
 
-TypeScript client for the [CraterView](https://craterview.ai) image enhancement and
+TypeScript client for the [CraterView.ai](https://craterview.ai) image enhancement and
 restoration API.
 
 ```bash
@@ -45,7 +45,7 @@ reimplement.
 Build against `echo` first. It costs no credits, needs no GPU and returns a real result — a
 plain upscale — so the request, the parameters and the response are the ones a paid model
 gives, and your integration needs no change when you switch. When you are ready, swap the
-model name for the one you want.
+model id for the one you want.
 
 ```ts
 const job = await cv.run(file, {
@@ -57,7 +57,7 @@ const job = await cv.run(file, {
 const blob = await job.blob();
 ```
 
-A parameter one model publishes is not one another accepts — `cv.models()` says which — and
+A parameter one model publishes is not necessarily one another accepts — `cv.models()` says which — and
 a value a model does not publish is refused at submit rather than ignored.
 
 ## An API key
@@ -109,7 +109,7 @@ a presigned URL and `blob()` GETs the result the same way; the API moves keys, n
 
 ## Retries are yours to write
 
-**Outside `run()` and `waitFor()`, this client does not retry.** `run()` asks its submission
+**Outside `run()` and `waitFor()`, this client does not retry.** `run()` sends its submission
 once more, under one idempotency key, when the first got no answer or a failure on the
 platform's side, and `waitFor()` reads on through the same until its timeout; neither can make a
 second job. Every other call is sent once. That is deliberate: only the caller knows where one
@@ -327,7 +327,7 @@ to storage and have five minutes.
 ## From Claude Code
 
 This repository is also a Claude Code marketplace. Two plugins: `craterview` connects
-CraterView's hosted tools so the assistant enhances images in the conversation, and
+CraterView.ai's hosted tools so the assistant enhances images in the conversation, and
 `craterview-api` teaches an agent to call the API from code with this client. See
 [`plugins/`](plugins/) for what each does and how it finds a key.
 
@@ -340,7 +340,7 @@ CraterView's hosted tools so the assistant enhances images in the conversation, 
 ## Versioning
 
 Semver, from `0.1.0` on. A release that removes an exported member, renames a field on `Job`
-or `ModelInfo`, or changes the type of one, gets a minor bump while this is `0.x` and a major
+or `ModelInfo`, or changes the type of one gets a minor bump while this is `0.x` and a major
 bump after `1.0.0`; anything purely additive gets a patch. Pin what you depend on.
 
 The API this wraps adds fields to its responses without warning, so treat an unfamiliar key in

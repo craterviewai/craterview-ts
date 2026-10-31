@@ -152,7 +152,7 @@ above tells the two apart.
 
 | Class | Meaning |
 |---|---|
-| `RateLimited` | 429 — one of five limits, and `.code` says which: `rate_limited` (the key's request rate), `too_many_uploads`, `too_many_keys`, `too_many_jobs` or `queue_full`. `.retryAfter` is seconds to wait: until the window rolls over for the two per-minute limits, until a new key can be made for the hourly one, or an interval to poll on for the other two. |
+| `RateLimited` | 429 — one of five limits, and `.code` says which: `rate_limited` (the account's request rate), `too_many_uploads`, `too_many_keys`, `too_many_jobs` or `queue_full`. `.retryAfter` is seconds to wait: until the window rolls over for the two per-minute limits, until a new key can be made for the hourly one, or an interval to poll on for the other two. |
 | `JobFailed` | The job ran and did not succeed. `.message` says what you can do about it; `.errorCode` is the half to branch on; `.jobId` is the job. |
 | `InvalidSignature` | A webhook delivery did not verify. Do not act on its body. |
 | `CraterViewError` | Everything else, including 4xx and 5xx from the API, and storage refusing an upload or a download. |
@@ -187,8 +187,9 @@ result's file are getters onto `result.output` rather than separate fields — t
 those links once. A model with no file to hand back returns its answer in `result` and leaves
 every one of them null; the fields it answers with are its `result_schema` in `cv.models()`.
 
-`credits` is the only figure about cost the API states, and the price is fixed and published
-per model, so an invoice reconciles against `credits` alone. For how long a job took, subtract
+`credits` is the only figure about cost the API states, and each model publishes its price in
+`cv.models()` — `credits_per_image`, and `credit_steps` where a smaller image costs less — so
+an invoice reconciles against `credits` alone. For how long a job took, subtract
 `createdAt` from `finishedAt` — that is the wait you had, queue included.
 
 **Uploads declare their size.** `upload()` and `run()` take the length from the `Blob`
@@ -197,8 +198,8 @@ accepts exactly that length and nothing else. You do not pass it — it is read 
 in hand, which is what makes it impossible to get wrong.
 
 **Running out of credit does not stop you.** A job submitted against a balance of zero is
-accepted and run, and charged when it succeeds — it goes to the community queue, which runs
-on shared, free capacity and can wait longer at busy times. It comes back with `community`
+accepted, and unless a subscription has work left this period it runs free on the community
+queue, which runs on shared, free capacity and can wait longer at busy times. It comes back with `community`
 set, and `usage()` reports the same flag for your next job before you send it. There is no
 payment error to handle: paying — with credit, or with a subscription — moves work onto paid
 compute that scales with demand, rather than buying the right to submit.

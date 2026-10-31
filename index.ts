@@ -18,7 +18,7 @@ import { imageSize } from "image-size";
 // Mirrored from package.json, which is the number a release bumps. It cannot be imported
 // from there — this ships as TypeScript, so the import would have to resolve in the
 // consumer's toolchain — so test/version.test.ts asserts the two agree.
-export const VERSION = "0.4.27";
+export const VERSION = "0.4.29";
 const DEFAULT_BASE_URL = "https://api.craterview.ai";
 // The server rejects a longer wait outright, so asking for one costs a 422 rather than the
 // wait you asked for. `run()` clamps to this rather than letting that happen.
@@ -154,7 +154,8 @@ export class CraterViewError extends Error {
  * says which — `rate_limited`, `too_many_keys`, `too_many_uploads`, `too_many_jobs` or
  * `queue_full`, in this order:
  *
- * - the key's request rate, per minute;
+ * - the account's request rate, per minute — counted across all its keys, for submitting
+ *   jobs, creating keys and gallery calls. No other call counts;
  * - the account's new keys, per hour — counted across all its keys, and only from
  *   `createKey`;
  * - the account's upload URLs, per minute — counted across all its keys;
@@ -436,8 +437,23 @@ export interface ModelInfo {
    * runs, as `input_too_small`, and is not charged. The same for every key.
    */
   min_input_side: number;
-  /** Whole credits. The price is flat and knowable before you send anything. */
+  /**
+   * Whole credits: what one still image costs, or the most one costs where `credit_steps`
+   * charges less for a smaller one. Knowable before you send anything.
+   */
   credits_per_image: number;
+  /**
+   * A lower price for a smaller still image, or null where every one costs
+   * `credits_per_image`. `by` is `megapixels` — the part of the image a job works on, the
+   * region you name with `roi` or the whole image, in millions of pixels, divided by 4 at
+   * `binning` 2x2, 9 at 3x3 and 16 at 4x4 — or `faces`, the faces the model redraws, counted
+   * when the job finishes. A still costs the first step its measure is at or under, and
+   * `credits_per_image` past the last.
+   */
+  credit_steps?: {
+    by: "megapixels" | "faces";
+    steps: { up_to: number; credits: number }[];
+  } | null;
   /** Whole credits. Null means this model takes stills only. */
   credits_per_video_second?: number | null;
   reference_fps: number;
@@ -480,7 +496,6 @@ export interface KeyInfo {
   created_at: string | null;
   /** When it stopped working, or null while it still does. */
   revoked_at?: string;
-  rate_limit_per_minute: number;
   /**
    * Whether this is the key you are calling with. It cannot be revoked by id while it is;
    * `DELETE /v1/keys/current` ends it on request, unless it is the account's only way
@@ -496,7 +511,6 @@ export interface NewKey {
   key: string;
   prefix: string;
   name: string;
-  rate_limit_per_minute: number;
 }
 
 /**

@@ -1,10 +1,24 @@
 {
   "name": "craterview",
-  "version": "0.4.31",
+  "version": "0.4.32",
   "dependencies": {
     "image-size": "^2.0.4"
   },
-  "description": "TypeScript client for the CraterView.ai image enhancement API",
+  "description": "TypeScript client for the CraterView.ai API: AI photo upscaling, denoising, restoration, headshots and AI image detection",
+  "keywords": [
+    "upscaling",
+    "super-resolution",
+    "image-restoration",
+    "api-client",
+    "image-upscaler",
+    "photo-enhancer",
+    "denoising",
+    "photo-restoration",
+    "headshot",
+    "ai-image-detector",
+    "content-moderation",
+    "typescript"
+  ],
   "type": "module",
   "main": "index.ts",
   "types": "index.ts",

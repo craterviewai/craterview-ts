@@ -28,6 +28,28 @@ both: it reads an image's dimensions from its header — nothing is decoded — 
 can tell the API how big your file is and `etaSeconds` is estimated for that file rather
 than for a typical one. `fetch`, `Blob` and `crypto.getRandomValues` are standard in both.
 
+## What it does
+
+Each model has its own page on the site:
+
+- [AI photo enhancer and upscaler](https://craterview.ai/features/enhance): `cv-enhance-v3`
+  enlarges a photo and rebuilds its fine detail at the new size.
+- [AI photo denoiser for grainy, low-light shots](https://craterview.ai/features/denoise):
+  `cv-denoise-v1` takes out the grain and keeps the colours, light and detail.
+- [AI photo restoration for old, damaged prints](https://craterview.ai/features/restore):
+  `cv-restore-v1` removes tears, creases, scratches and dust and corrects faded colour.
+- [AI face enhancer for group photos](https://craterview.ai/features/small-faces):
+  `cv-faces-v1` redraws faces too small or blurred to look natural.
+- [AI headshot generator from a snapshot](https://craterview.ai/features/headshot):
+  `cv-headshot-v1` turns a photo of a person into a professional headshot.
+- [AI image detector](https://craterview.ai/features/real-or-ai): `cv-real-check-v2`
+  estimates whether an image was made by a generative model.
+- [AI content moderation for images](https://craterview.ai/features/content-moderation):
+  `cv-content-check-v1` screens an image against the content policy.
+
+[All features](https://craterview.ai/features) are on one page. What each model costs, its
+limits and its parameters are in the catalogue: `cv.models()`.
+
 ## Quickstart
 
 ```ts

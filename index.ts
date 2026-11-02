@@ -18,7 +18,7 @@ import { imageSize } from "image-size";
 // Mirrored from package.json, which is the number a release bumps. It cannot be imported
 // from there — this ships as TypeScript, so the import would have to resolve in the
 // consumer's toolchain — so test/version.test.ts asserts the two agree.
-export const VERSION = "0.4.32";
+export const VERSION = "0.4.34";
 const DEFAULT_BASE_URL = "https://api.craterview.ai";
 // The server rejects a longer wait outright, so asking for one costs a 422 rather than the
 // wait you asked for. `run()` clamps to this rather than letting that happen.
@@ -1110,8 +1110,12 @@ export class CraterView {
   }
 
   /**
-   * Mint another key. **The value is in this response and nowhere else** — keys are stored
-   * as hashes, so one that is not written down has to be replaced rather than recovered.
+   * Mint another key, named for what will use it. **The value is in this response and
+   * nowhere else** — keys are stored as hashes, so one that is not written down has to be
+   * replaced rather than recovered.
+   *
+   * The name is required: every key on the account is listed by it, with `keys()` and on the
+   * account page, and it is how you tell one from another when you come to revoke one.
    *
    * Several keys on an account is the ordinary arrangement, one per service or environment.
    * They share the account's credits and history. This is also how you rotate without
@@ -1120,7 +1124,7 @@ export class CraterView {
    * An account is given a limited number of new keys an hour, whichever of its keys asks:
    * past it this throws `RateLimited`, whose `retryAfter` says when to ask again.
    */
-  async createKey(name = "api"): Promise<NewKey> {
+  async createKey(name: string): Promise<NewKey> {
     return await this.request("POST", "/v1/keys", { name }) as NewKey;
   }
 

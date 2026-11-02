@@ -129,7 +129,7 @@ describe.skipIf(!shared)("wire contract: errors", () => {
  */
 const METHODS: Record<string, (cv: CraterView, args: any[]) => Promise<unknown>> = {
   keys: (cv) => cv.keys(),
-  create_key: (cv, args) => (args.length ? cv.createKey(args[0]) : cv.createKey()),
+  create_key: (cv, args) => cv.createKey(args[0]),
   revoke_key: (cv, args) => cv.revokeKey(args[0]),
   webhook_secret: (cv) => cv.webhookSecret(),
   rotate_webhook_secret: (cv) => cv.rotateWebhookSecret(),

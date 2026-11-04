@@ -18,7 +18,7 @@ import { imageSize } from "image-size";
 // Mirrored from package.json, which is the number a release bumps. It cannot be imported
 // from there — this ships as TypeScript, so the import would have to resolve in the
 // consumer's toolchain — so test/version.test.ts asserts the two agree.
-export const VERSION = "0.4.36";
+export const VERSION = "0.4.37";
 const DEFAULT_BASE_URL = "https://api.craterview.ai";
 // The server rejects a longer wait outright, so asking for one costs a 422 rather than the
 // wait you asked for. `run()` clamps to this rather than letting that happen.
@@ -475,12 +475,11 @@ export interface ModelInfo {
    */
   result_schema: Record<string, unknown>;
   /**
-   * Whether your key's work goes to the community queue, which runs on shared, free capacity
-   * and can wait longer at busy times. False while the account is paying — holding credit, or
-   * on a subscription — which puts its work on paid compute that scales with demand.
+   * Whether your next job runs free on the community queue: same models, smaller size limits,
+   * longer waits at busy times. True without credit or a subscription, or once a limited
+   * subscription's monthly allowance is spent. Otherwise it runs on paid compute.
    *
-   * The same field, meaning the same thing, as `Job.community`. How long a wait will be
-   * is answered on the job, once you have one — `Job.eta_seconds` — and nowhere else.
+   * How long a wait will be is answered on the job, once you have one: `Job.eta_seconds`.
    */
   community: boolean;
   /** Of `params_schema`, the ones that apply to still images only. */
@@ -609,7 +608,7 @@ export interface JobData {
  * A submitted job. Mirrors the API's job representation field for field.
  *
  * `credits` is what you were billed, and it is the only figure about cost the API states.
- * What your balance does not cover is never collected: it is written off when credit next
+ * Nothing is owed for what the balance does not cover: it is written off when credit next
  * arrives or a subscription renews.
  * For how long a job took, `finishedAt` minus `createdAt` is the wait you actually had,
  * queue included — both are here and both are on the webhook, which states the same fields
@@ -635,12 +634,9 @@ export interface JobData {
  * run is done — an estimate that never reaches 1 before the job finishes, and null when none
  * holds. Null while the job is queued and once it has settled.
  *
- * `community` says the job is on the community queue, which runs on shared, free capacity —
- * so it waits longer at busy times, and never stops. That is where an account's work goes
- * when it is not paying: no credit, and no subscription with work left this period. An empty
- * balance is never itself a reason to refuse a job — paying moves work onto paid compute that
- * scales with demand, not the right to submit — but on some models the community queue takes
- * smaller files.
+ * `community` says the job runs free on the community queue: same models, smaller size
+ * limits, longer waits at busy times. A job goes there without credit or a subscription, or
+ * once a limited subscription's monthly allowance is spent. A balance of zero never stops a job.
  * `models()` lists each model's limits for your key, and a file over them is refused with
  * the limit named.
  */
@@ -710,6 +706,10 @@ export class Job {
   }
   get contentType() { return (this.output["content_type"] as string) ?? null; }
   get outputBytes() { return (this.output["bytes"] as number) ?? null; }
+  /** The result's width in pixels. */
+  get outputWidth() { return (this.output["width"] as number) ?? null; }
+  /** The result's height in pixels. */
+  get outputHeight() { return (this.output["height"] as number) ?? null; }
 
   /** Null when absent or unparseable — never a bad Date, which compares false to itself. */
   get createdAt(): Date | null { return this.moment(this.data.created_at); }
@@ -928,10 +928,8 @@ export class CraterView {
    *
    * Prices are published here, so the cost of a job is knowable before submitting it.
    *
-   * `community` and the limits are answered **for the queue your key would use**. The API
-   * looks up the account's standing and reports the queue a job from this key would land
-   * in — so two keys asking at the same moment can get different answers, and paying —
-   * credit or a subscription — changes yours.
+   * `community` and the limits are for your key's next job, so two keys can get different
+   * answers, and credit or a subscription changes yours.
    *
    * A model that is available is not always listed — a model in trial, or being retired,
    * stays usable by name while absent from this catalog.
@@ -1061,13 +1059,33 @@ export class CraterView {
    * time, and `credits_granted` what it has been given. `credits_remaining` is always a
    * number, floored at zero. A balance of zero never stops a
    * submission: `community` says whether your next job runs on the community queue, which is
-   * free and can wait longer at busy times, or on paid compute. `jobs_in_flight` and
+   * free and can wait longer at busy times, or on paid compute. `subscription_allowance` is a
+   * number on a limited subscription and null on an unlimited one. `jobs_in_flight` and
    * `max_jobs_in_flight` are the state of the queue and are what a 429 on submit is about.
    *
    * Account-wide, so every key on an account reports the same figures.
    */
   async usage(): Promise<unknown> {
     return await this.request("GET", "/v1/usage");
+  }
+
+  /**
+   * What a job would cost and how large its result would be, without running it.
+   *
+   * Nothing is uploaded, queued or charged. `inputWidth` and `inputHeight` are the picture's size
+   * the way up a person sees it. A size a job would be refused for is an error with status 422,
+   * in the words the job would fail with.
+   *
+   * The answer has `credits`, or `credits_at_most` where the price is not known yet, `community`
+   * for the queue that price is for, and `result_megapixels` where `scale` sizes the job.
+   */
+  async quote(model: string, params: Record<string, unknown> = {},
+              size: { inputWidth?: number; inputHeight?: number } = {}): Promise<unknown> {
+    return await this.request("POST", "/v1/quotes", {
+      model, params,
+      ...(size.inputWidth !== undefined ? { input_width: size.inputWidth } : {}),
+      ...(size.inputHeight !== undefined ? { input_height: size.inputHeight } : {}),
+    });
   }
 
   /**

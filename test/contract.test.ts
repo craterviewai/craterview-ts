@@ -133,6 +133,7 @@ const METHODS: Record<string, (cv: CraterView, args: any[]) => Promise<unknown>>
   revoke_key: (cv, args) => cv.revokeKey(args[0]),
   webhook_secret: (cv) => cv.webhookSecret(),
   rotate_webhook_secret: (cv) => cv.rotateWebhookSecret(),
+  quote: (cv, args) => cv.quote(args[0], args[1], { inputWidth: args[2], inputHeight: args[3] }),
 };
 
 describe.skipIf(!shared)("wire contract: account", () => {

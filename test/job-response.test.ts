@@ -44,6 +44,8 @@ describe.skipIf(!shared)("what a client reads out of a job", () => {
       expect(Boolean(job.thumbnailUrl)).toBe(want.has_thumbnail_url);
       expect(job.contentType).toBe(want.output_content_type ?? null);
       expect(job.outputBytes).toBe(want.output_bytes ?? null);
+      expect(job.outputWidth).toBe(want.output_width ?? null);
+      expect(job.outputHeight).toBe(want.output_height ?? null);
     });
   }
 });

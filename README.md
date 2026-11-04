@@ -202,6 +202,7 @@ Every field the API publishes on a job is exposed here.
 | `inputUrl` | The picture the model worked from — the region, where you named one |
 | `contentType` | The result's media type |
 | `outputBytes` | The result's size in bytes |
+| `outputWidth`, `outputHeight` | The result's size in pixels |
 | `blob()`, `arrayBuffer()` | Download the result |
 
 `result` is the whole of what the job produced, and the rows above it that describe the
@@ -219,12 +220,12 @@ they are about to send and declare it; the API signs it into the presigned URL, 
 accepts exactly that length and nothing else. You do not pass it — it is read off the data
 in hand, which is what makes it impossible to get wrong.
 
-**Running out of credit does not stop you.** A job submitted against a balance of zero is
-accepted, and unless a subscription has work left this period it runs free on the community
-queue, which runs on shared, free capacity and can wait longer at busy times. It comes back with `community`
-set, and `usage()` reports the same flag for your next job before you send it. There is no
-payment error to handle: paying — with credit, or with a subscription — moves work onto paid
-compute that scales with demand, rather than buying the right to submit.
+**Running out of credit does not stop you.** A job at a balance of zero is accepted. Without a
+subscription, or once a limited subscription's monthly allowance is spent, it runs free on the
+community queue: same models, smaller size limits, longer waits at busy times. It comes back with
+`community` set, and `usage()` reports the same flag for your next job before you send it. There
+is no payment error to handle: credit or a subscription moves work onto paid compute that scales
+with demand.
 `etaSeconds` covers the whole wait, queue time included, so a community job simply reports
 a longer one.
 
@@ -321,6 +322,7 @@ old one. You cannot revoke the key you are calling with.
 await cv.models();                            // models, what each takes and answers with, which queue you are on
 await cv.job("job_...");                      // one job by id
 await cv.usage();                             // credit balance, next job's queue, spend and job counts
+await cv.quote("cv-enhance-v3", { scale: 2 }, { inputWidth: 1500, inputHeight: 1000 }); // a job's price and result size, run nothing
 
 for await (const job of cv.jobs({ limit: 50, status: "succeeded" })) {
   console.log(job.id, job.status);            // newest first, paging transparently

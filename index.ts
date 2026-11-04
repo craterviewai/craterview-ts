@@ -18,7 +18,7 @@ import { imageSize } from "image-size";
 // Mirrored from package.json, which is the number a release bumps. It cannot be imported
 // from there — this ships as TypeScript, so the import would have to resolve in the
 // consumer's toolchain — so test/version.test.ts asserts the two agree.
-export const VERSION = "0.4.35";
+export const VERSION = "0.4.36";
 const DEFAULT_BASE_URL = "https://api.craterview.ai";
 // The server rejects a longer wait outright, so asking for one costs a 422 rather than the
 // wait you asked for. `run()` clamps to this rather than letting that happen.
@@ -502,6 +502,12 @@ export interface KeyInfo {
    * back in. This client has no method for that call.
    */
   current: boolean;
+  /**
+   * Whether this key belongs to the CraterView.ai app on an iPhone or iPad: the key the
+   * person's devices share, or one device's own. It cannot be revoked by id; the app ends it
+   * when the person signs out in it.
+   */
+  app: boolean;
 }
 
 /** A freshly minted key. The only response that carries a usable value. */
@@ -1133,7 +1139,9 @@ export class CraterView {
    *
    * You cannot revoke the key this client is authenticating with: it is refused with status
    * 409, because it would leave you unable to make another. Create a replacement, move onto
-   * it, then revoke this one.
+   * it, then revoke this one. A key of the CraterView.ai app on an iPhone or iPad, which
+   * `keys()` marks `app`, is refused with 409 too: those end when the person signs out in
+   * the app.
    *
    * `keyId` is a key's `id` from `keys()` or `createKey()`, never its value or its prefix.
    * Anything else throws a `CraterViewError` without a request being made.

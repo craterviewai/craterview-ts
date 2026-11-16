@@ -18,7 +18,7 @@ import { imageSize } from "image-size";
 // Mirrored from package.json, which is the number a release bumps. It cannot be imported
 // from there — this ships as TypeScript, so the import would have to resolve in the
 // consumer's toolchain — so test/version.test.ts asserts the two agree.
-export const VERSION = "0.4.45";
+export const VERSION = "0.4.47";
 const DEFAULT_BASE_URL = "https://api.craterview.ai";
 // The server rejects a longer wait outright, so asking for one costs a 422 rather than the
 // wait you asked for. `run()` clamps to this rather than letting that happen.
@@ -475,9 +475,10 @@ export interface ModelInfo {
    */
   result_schema: Record<string, unknown>;
   /**
-   * Whether your next job runs free on the community queue: same models, smaller size limits,
-   * longer waits at busy times. True without credit or a subscription, or once a limited
-   * subscription's monthly allowance is spent. Otherwise it runs on paid compute.
+   * Whether your next job runs free on the community queue: same models, smaller size limits
+   * on those that return a picture, longer waits at busy times. True without credit or a
+   * subscription, or once a limited subscription's monthly allowance is spent. Otherwise it
+   * runs on paid compute.
    *
    * How long a wait will be is answered on the job, once you have one: `Job.eta_seconds`.
    */
@@ -635,8 +636,9 @@ export interface JobData {
  * holds. Null while the job is queued and once it has settled.
  *
  * `community` says the job runs free on the community queue: same models, smaller size
- * limits, longer waits at busy times. A job goes there without credit or a subscription, or
- * once a limited subscription's monthly allowance is spent. A balance of zero never stops a job.
+ * limits on those that return a picture, longer waits at busy times. A job goes there without
+ * credit or a subscription, or once a limited subscription's monthly allowance is spent. A
+ * balance of zero never stops a job.
  * `models()` lists each model's limits for your key, and a file over them is refused with
  * the limit named.
  */

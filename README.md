@@ -172,8 +172,8 @@ Every answer the API or storage gives that is not a success is thrown as a
 `CraterViewError`. `.status` carries the HTTP status where there was one, `.code` the API's stable name for a refusal — branch on it, not on the message — and `.traceId` the
 API's `X-Trace-Id` for a request it answered and refused — the id to quote when you ask us
 about it. `.jobId` names the job an error is about, where there is one. A request that got
-no answer at all throws the runtime's own error from `fetch`, which is how the retry loop
-above tells the two apart.
+no answer at all, or one cut off on the way, throws the runtime's own error from `fetch`,
+which is how the retry loop above tells the two apart.
 
 | Class | Meaning |
 |---|---|
@@ -200,9 +200,9 @@ Every field the API publishes on a job is exposed here.
 | `credits` | **What you were billed.** Nothing past your balance is collected |
 | `etaSeconds` | Seconds until the job is expected to finish, recomputed on every read — it counts down while the job runs. Absent once the job has settled. Estimated for your image's size when `upload()` could read it (or when you pass `inputMegapixels` to `submit()`), for a typical image otherwise |
 | `community` | True when the job is on the community queue, which runs on shared, free capacity and can wait longer at busy times |
-| `outputUrl`, `downloadUrl` | The result, presigned. One to display, one to save |
-| `thumbnailUrl` | A small JPEG of the job's picture, for listings — the result, or what the model worked from when it produced no file. Null when none was drawn |
-| `inputUrl` | The picture the model worked from — the region, where you named one |
+| `outputUrl`, `downloadUrl` | The result, presigned. One to display, one to save. Null on a job from `jobs()`: read it with `job(id)` |
+| `thumbnailUrl` | A small JPEG of the job's picture, for listings — the result, or what the model worked from when it produced no file. Null when none was drawn, and on a job from `jobs()` unless asked with `includeThumbnails: true` |
+| `inputUrl` | The picture the model worked from — the region, where you named one. Null on a job from `jobs()` |
 | `contentType` | The result's media type |
 | `outputBytes` | The result's size in bytes |
 | `outputWidth`, `outputHeight` | The result's size in pixels |
@@ -225,7 +225,7 @@ in hand, which is what makes it impossible to get wrong.
 
 **Running out of credit does not stop you.** A job at a balance of zero is accepted. Without a
 subscription, or once a limited subscription's monthly allowance is spent, it runs free on the
-community queue: same models, smaller size limits on those that return a picture, longer waits
+community queue: same models, smaller size limits on most of those that return a picture, longer waits
 at busy times. It comes back with `community` set, and `usage()` reports the same flag for your
 next job before you send it. There
 is no payment error to handle: credit or a subscription moves work onto paid compute that scales
@@ -239,7 +239,9 @@ result rather than storing the link.
 
 `thumbnailUrl` and `inputUrl` are for building a job listing: a few-hundred-pixel preview so a
 page of jobs costs kilobytes, and the picture the model worked from so a result can be
-shown against it. Where you named a region, `inputUrl` is that region — so a before-and-after
+shown against it. `cv.jobs({ includeThumbnails: true })` gives each job its preview and no
+other link; read a job with `cv.job(id)` when one is opened, for its result and `inputUrl`.
+Where you named a region, `inputUrl` is that region — so a before-and-after
 is a true pair, and what was used is something you can look at rather than something to take
 on trust. It is not the file you uploaded but a new one written from it, not copied —
 so do not expect a hash of it to match your file's, and a JPEG or WebP is compressed
@@ -328,7 +330,7 @@ await cv.job("job_...");                      // one job by id
 await cv.usage();                             // credit balance, next job's queue, spend and job counts
 await cv.quote("cv-enhance-v3", { scale: 2 }, { inputWidth: 1500, inputHeight: 1000 }); // a job's price and result size, run nothing
 
-for await (const job of cv.jobs({ limit: 50, status: "succeeded" })) {
+for await (const job of cv.jobs({ limit: 50 })) {
   console.log(job.id, job.status);            // newest first, paging transparently
 }
 ```

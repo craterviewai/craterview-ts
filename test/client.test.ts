@@ -321,6 +321,20 @@ describe("pagination", () => {
     expect(calls[0]!.url).toContain("limit=200");
   });
 
+  it("asks for thumbnails on every page, and only when told to", async () => {
+    // A listed job carries no link unless the list is asked for previews, and the asking is
+    // per request, so a second page without it would come back bare.
+    const asked = stubFetch([
+      { body: { data: [{ id: "a", model: "m", status: "succeeded" }], has_more: true, next_before: "a" } },
+      { body: { data: [{ id: "b", model: "m", status: "succeeded" }], has_more: false } },
+    ]);
+    for await (const _ of client("k").jobs({ limit: 1, includeThumbnails: true })) { /* drained */ }
+    expect(asked.map((c) => c.url).every((u) => u.includes("include_thumbnails=true"))).toBe(true);
+    const plain = stubFetch([{ body: { data: [], has_more: false } }]);
+    for await (const _ of client("k").jobs()) { /* drained */ }
+    expect(plain[0]!.url).not.toContain("include_thumbnails");
+  });
+
   it("sends a page the API will serve as asked", async () => {
     // The other side, so the clamp cannot become a fixed page size.
     const calls = stubFetch([{ body: { data: [], has_more: false } }]);
@@ -695,7 +709,7 @@ describe("giving up on a job", () => {
       call++;
       if (call >= 3) {
         return { ok: false, status: 503, headers: new Headers({ "X-Trace-Id": "trace-1" }),
-                 json: async () => ({ detail: words }) } as unknown as Response;
+                 json: async () => ({ detail: words, code: "unavailable" }) } as unknown as Response;
       }
       return { ok: true, status: 200, headers: new Headers(),
                json: async () => ({ input_key: "inputs/abc", upload_url: "http://storage.test/put" }) } as unknown as Response;
@@ -704,6 +718,31 @@ describe("giving up on a job", () => {
     expect(failure).toBeInstanceOf(CraterViewError);
     expect(failure.message).toContain(words);
     expect(failure.message).not.toMatch(/may have been made/);
+    expect(failure.code).toBe("unavailable");
+  });
+
+  it("carries no code saying nothing was done when a job may have been made", async () => {
+    // A page from something on the way says nothing about the job, so run() says one may have
+    // been made. The API's 503 to the second ask says only that the second did nothing: carried
+    // on, its `unavailable` would tell a caller branching on the code that nothing was done.
+    let call = 0;
+    vi.stubGlobal("fetch", async () => {
+      call++;
+      if (call === 3) {
+        return { ok: false, status: 502, headers: new Headers(),
+                 json: async () => { throw new SyntaxError("not JSON"); } } as unknown as Response;
+      }
+      if (call === 4) {
+        return { ok: false, status: 503, headers: new Headers({ "X-Trace-Id": "trace-1" }),
+                 json: async () => ({ detail: "unavailable", code: "unavailable" }) } as unknown as Response;
+      }
+      return { ok: true, status: 200, headers: new Headers(),
+               json: async () => ({ input_key: "inputs/abc", upload_url: "http://storage.test/put" }) } as unknown as Response;
+    });
+    const failure = await client("k").run(new Blob(["x"])).catch((e) => e);
+    expect(failure).toBeInstanceOf(CraterViewError);
+    expect(failure.message).toMatch(/may have been made/);
+    expect(failure.code).toBeUndefined();
   });
 
   it("says what repeating would do when its submission gets no answer", async () => {
@@ -789,6 +828,33 @@ describe("a job once submitted is not lost", () => {
     expect(new Set(keys).size).toBe(1);
   });
 
+  // fetch raises a body the network cut off as a TypeError, and one the timeout stopped as a
+  // TimeoutError. Both were read as an answer that was not the API's, so a job the first ask made
+  // was neither asked after nor said to exist.
+  const asksAgainAfter = async (made: () => Error) => {
+    const keys: string[] = [];
+    vi.stubGlobal("fetch", async (url: string | URL, init: RequestInit = {}) => {
+      const path = new URL(String(url)).pathname;
+      const answer = (status: number, json: () => Promise<unknown>) =>
+        ({ ok: true, status, headers: new Headers(), json }) as unknown as Response;
+      if (path === "/v1/uploads") return answer(200, async () => upload[0]!.body);
+      if (path !== "/v1/jobs") return answer(200, async () => ({}));
+      keys.push((init.headers as Record<string, string>)["Idempotency-Key"]!);
+      return keys.length === 1
+        ? answer(201, async () => { throw made(); })
+        : answer(200, async () => done.body);
+    });
+    expect((await client("k").run(new Blob(["x"]))).id).toBe(JOB_ID);
+    expect(keys).toHaveLength(2);
+    expect(new Set(keys).size).toBe(1);
+  };
+
+  it("asks a submission whose answer was cut off once more, under one key", () =>
+    asksAgainAfter(() => new TypeError("terminated")));
+
+  it("asks a submission whose answer the timeout stopped once more, under one key", () =>
+    asksAgainAfter(() => new DOMException("signal timed out", "TimeoutError")));
+
   it("says a refusal and does not ask it again", async () => {
     const calls = stubFetch([...upload, { status: 422, body: { detail: "scale: must be at most 4" } }]);
     const failure = await client("k").run(new Blob(["x"])).catch((e) => e);
@@ -808,11 +874,12 @@ describe("a job once submitted is not lost", () => {
     expect((await client("k").waitFor(JOB_ID, 5_000, 5)).status).toBe("succeeded");
   });
 
-  it("carries the job on a read that is refused", async () => {
-    stubFetch([{ status: 403, body: { detail: "not your job" } }]);
+  it("carries the job, and the refusal's code, on a read that is refused", async () => {
+    stubFetch([{ status: 404, body: { detail: "no such job", code: "job_not_found" } }]);
     const failure = await client("k").waitFor(JOB_ID, 5_000, 5).catch((e) => e);
     expect(failure).toBeInstanceOf(CraterViewError);
     expect(failure.jobId).toBe(JOB_ID);
+    expect(failure.code).toBe("job_not_found");
   });
 });
 

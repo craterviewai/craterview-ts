@@ -18,7 +18,7 @@ import { imageSize } from "image-size";
 // Mirrored from package.json, which is the number a release bumps. It cannot be imported
 // from there — this ships as TypeScript, so the import would have to resolve in the
 // consumer's toolchain — so test/version.test.ts asserts the two agree.
-export const VERSION = "0.4.48";
+export const VERSION = "0.4.49";
 const DEFAULT_BASE_URL = "https://api.craterview.ai";
 // The server rejects a longer wait outright, so asking for one costs a 422 rather than the
 // wait you asked for. `run()` clamps to this rather than letting that happen.
@@ -123,6 +123,23 @@ function worthAskingAgain(e: unknown): boolean {
     || (e instanceof CraterViewError && (e.status ?? 0) >= 500);
 }
 
+/** Goes on with anything but a body that arrived whole and was not JSON, the one `SyntaxError`
+ *  reading it raises. A body the network cut off (a `TypeError`) or the timeout stopped (a
+ *  `TimeoutError`) is no whole answer, and stays the runtime's own error, for a caller or
+ *  `run()` to ask again. */
+function onlyNotJson(e: unknown): void {
+  if (!(e instanceof SyntaxError)) throw e;
+}
+
+/** `e` itself, with `message` in place of its own and each of `changed` set: its class and every
+ *  other field kept, so one added later is not dropped where an error is said again. */
+function restated<E extends CraterViewError>(e: E, message: string,
+                                             changed: { jobId?: string; code?: string } = {}): E {
+  Object.assign(e, changed);
+  e.message = message;
+  return e;
+}
+
 /** The API's own 503 to a submission: the one status it answers before anything is recorded,
  *  so nothing was queued or charged. A 503 page from something on the way carries no trace id
  *  and says nothing about the job. */
@@ -155,7 +172,8 @@ export class CraterViewError extends Error {
  * `queue_full`, in this order:
  *
  * - the account's request rate, per minute — counted across all its keys, for submitting
- *   jobs, creating keys and gallery calls. No other call counts;
+ *   jobs, creating keys, keeping a result or ending a keep, and gallery calls. No other
+ *   call counts;
  * - the account's new keys, per hour — counted across all its keys, and only from
  *   `createKey`;
  * - the account's upload URLs, per minute — counted across all its keys;
@@ -476,7 +494,7 @@ export interface ModelInfo {
   result_schema: Record<string, unknown>;
   /**
    * Whether your next job runs free on the community queue: same models, smaller size limits
-   * on those that return a picture, longer waits at busy times. True without credit or a
+   * on most of those that return a picture, longer waits at busy times. True without credit or a
    * subscription, or once a limited subscription's monthly allowance is spent. Otherwise it
    * runs on paid compute.
    *
@@ -624,8 +642,10 @@ export interface JobData {
  *
  * `thumbnailUrl` is a small JPEG of the job's picture — the result, or the image the model
  * worked from when it produced no file — for showing a page of jobs without downloading a
- * page of full-size pictures. `inputUrl` is the picture the model worked from, so a result
- * can be shown against what it was made from. Both expire with the job's other pictures.
+ * page of full-size pictures. A job from `jobs()` has it only when the list is asked with
+ * `includeThumbnails: true`, and has no other link: `job(id)` reads one job with all of them.
+ * `inputUrl` is the picture the model worked from, so a result can be shown against what it
+ * was made from. Both expire with the job's other pictures.
  *
  * `etaSeconds` is the whole of what is reported about waiting: how long until the result,
  * counting time spent waiting for a GPU as well as time spent on one. An estimate and never
@@ -636,7 +656,7 @@ export interface JobData {
  * holds. Null while the job is queued and once it has settled.
  *
  * `community` says the job runs free on the community queue: same models, smaller size
- * limits on those that return a picture, longer waits at busy times. A job goes there without
+ * limits on most of those that return a picture, longer waits at busy times. A job goes there without
  * credit or a subscription, or once a limited subscription's monthly allowance is spent. A
  * balance of zero never stops a job.
  * `models()` lists each model's limits for your key, and a file over them is refused with
@@ -890,7 +910,8 @@ export class CraterView {
     if (resp.status === 204) return undefined as T;
     try {
       return await resp.json() as T;
-    } catch {
+    } catch (e) {
+      onlyNotJson(e);
       throw new CraterViewError(this.notTheApi(resp.status), resp.status, traceId);
     }
   }
@@ -901,7 +922,8 @@ export class CraterView {
     let body: unknown;
     try {
       body = await resp.json();
-    } catch {
+    } catch (e) {
+      onlyNotJson(e);
       return { detail: this.notTheApi(resp.status) };
     }
     const said = body as { detail?: unknown; code?: unknown } | null;
@@ -1030,13 +1052,18 @@ export class CraterView {
    * `limit` is how many jobs one request fetches, not how many you get: iteration continues
    * until the history runs out. 200 is the largest page the API serves, and a bigger number
    * is fetched as 200 rather than sent and refused.
+   *
+   * A job from here carries no links: `outputUrl`, `downloadUrl` and `inputUrl` are null, and
+   * `job(id)` reads one job with them. `includeThumbnails: true` gives each job its
+   * `thumbnailUrl`, a small preview for showing the list.
    */
-  async *jobs(options: { limit?: number } = {}): AsyncGenerator<Job> {
+  async *jobs(options: { limit?: number; includeThumbnails?: boolean } = {}): AsyncGenerator<Job> {
     let before: string | undefined;
     for (;;) {
       const params = new URLSearchParams({
         limit: String(Math.min(options.limit ?? 50, MAX_PAGE)),
       });
+      if (options.includeThumbnails) params.set("include_thumbnails", "true");
       if (before) params.set("before", before);
 
       const page = await this.request<{ data: JobData[]; has_more: boolean; next_before?: string }>(
@@ -1193,7 +1220,7 @@ export class CraterView {
           continue;
         }
         if (e instanceof CraterViewError && !e.jobId) {
-          throw new CraterViewError(e.message, e.status, e.traceId, id);
+          throw restated(e, e.message, { jobId: id });
         }
         throw e;
       }
@@ -1245,9 +1272,8 @@ export class CraterView {
       if (!worthAskingAgain(e)) throw e;
       if (queuedNothing(first) && queuedNothing(e)) {
         const refused = e as CraterViewError;
-        throw new CraterViewError(
-          `the submission was asked twice, and both times CraterView said why: ${refused.message}`,
-          refused.status, refused.traceId);
+        throw restated(refused,
+          `the submission was asked twice, and both times CraterView said why: ${refused.message}`);
       }
       // Thrown as the kind it was, so a caller telling no answer from a refusal by type sees
       // what it saw before. Only the advice changes: run() uploads afresh each time.
@@ -1255,7 +1281,10 @@ export class CraterView {
         + `(${(e as Error).message}), so a job may have been made; if it was, it runs and is `
         + "charged only if it succeeds. Look for it with jobs(), newest first, before running "
         + "this again: run() uploads afresh, so repeating it starts a second job.";
-      if (e instanceof CraterViewError) throw new CraterViewError(said, e.status, e.traceId);
+      // Without the second answer's code: it says what became of that ask, and the first may
+      // have made a job. An `unavailable` here would tell a caller branching on it that nothing
+      // was done.
+      if (e instanceof CraterViewError) throw restated(e, said, { code: undefined });
       if ((e as Error).name === "TimeoutError") throw new DOMException(said, "TimeoutError");
       throw new TypeError(said);
     }

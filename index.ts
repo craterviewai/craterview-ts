@@ -18,7 +18,7 @@ import { imageSize } from "image-size";
 // Mirrored from package.json, which is the number a release bumps. It cannot be imported
 // from there — this ships as TypeScript, so the import would have to resolve in the
 // consumer's toolchain — so test/version.test.ts asserts the two agree.
-export const VERSION = "0.4.49";
+export const VERSION = "0.4.50";
 const DEFAULT_BASE_URL = "https://api.craterview.ai";
 // The server rejects a longer wait outright, so asking for one costs a 422 rather than the
 // wait you asked for. `run()` clamps to this rather than letting that happen.
@@ -493,10 +493,9 @@ export interface ModelInfo {
    */
   result_schema: Record<string, unknown>;
   /**
-   * Whether your next job runs free on the community queue: same models, smaller size limits
-   * on most of those that return a picture, longer waits at busy times. True without credit or a
-   * subscription, or once a limited subscription's monthly allowance is spent. Otherwise it
-   * runs on paid compute.
+   * Whether your next job runs free on the community queue: smaller size limits on some models
+   * and longer waits at busy times. True without credit or a subscription, or once a limited
+   * subscription's monthly allowance is spent. Otherwise the job runs on paid compute.
    *
    * How long a wait will be is answered on the job, once you have one: `Job.eta_seconds`.
    */
@@ -627,8 +626,7 @@ export interface JobData {
  * A submitted job. Mirrors the API's job representation field for field.
  *
  * `credits` is what you were billed, and it is the only figure about cost the API states.
- * Nothing is owed for what the balance does not cover: it is written off when credit next
- * arrives or a subscription renews.
+ * Nothing is owed for work the balance does not cover.
  * For how long a job took, `finishedAt` minus `createdAt` is the wait you actually had,
  * queue included — both are here and both are on the webhook, which states the same fields
  * by the same names.
@@ -656,7 +654,7 @@ export interface JobData {
  * holds. Null while the job is queued and once it has settled.
  *
  * `community` says the job runs free on the community queue: same models, smaller size
- * limits on most of those that return a picture, longer waits at busy times. A job goes there without
+ * limits on some of them, longer waits at busy times. A job goes there without
  * credit or a subscription, or once a limited subscription's monthly allowance is spent. A
  * balance of zero never stops a job.
  * `models()` lists each model's limits for your key, and a file over them is refused with
@@ -1078,18 +1076,17 @@ export class CraterView {
   }
 
   /**
-   * The account's credit balance, what it has spent, and what is in flight.
+   * The account's subscription, credit balance, spend per model, and what is in flight.
    *
-   * All-time, not monthly: credits are granted and deplete rather than renewing. A job is
-   * charged when it succeeds, so queued and running work is not in the figures yet, and a
-   * failed job costs nothing.
+   * Credits are granted and deplete rather than renewing. A job is charged when it succeeds,
+   * so queued and running work is not in the figures yet, and a failed job costs nothing.
    *
-   * The balance is `credits_remaining`; `credits_spent` is what the account has spent, all
-   * time, and `credits_granted` what it has been given. `credits_remaining` is always a
-   * number, floored at zero. A balance of zero never stops a
-   * submission: `community` says whether your next job runs on the community queue, which is
-   * free and can wait longer at busy times, or on paid compute. `subscription_allowance` is a
-   * number on a limited subscription and null on an unlimited one. `jobs_in_flight` and
+   * `subscribed` says whether a subscription is live; `subscription_allowance` is a number on
+   * a limited subscription and null on an unlimited one. The balance is `credits_remaining`,
+   * always a number, floored at zero, and nothing is owed for work it does not cover. A
+   * balance of zero never stops a submission: `community` says whether your next job runs on
+   * the community queue, which is free and can wait longer at busy times, or on paid compute.
+   * `by_model` is what each model has cost, all time. `jobs_in_flight` and
    * `max_jobs_in_flight` are the state of the queue and are what a 429 on submit is about.
    *
    * Account-wide, so every key on an account reports the same figures.
